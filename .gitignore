@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Tool caches and test output
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build artifacts (build/*.py are source and stay tracked)
+dist/
+build/work/
+*.spec
+*.spec.bak
+
+# Runtime data and local backups: never commit (Agents.md)
+data/
+backups/
+*.bak
+*.lock
+*.log
+*.lanvas
+
+# Keys and secrets: never commit (Agents.md)
+*.pem
+*.key
+*.pub
+*_ed25519*
+identity*.json
+.env
+.env.*
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code local files
+.claude/

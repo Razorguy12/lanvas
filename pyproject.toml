@@ -1,0 +1,30 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+"client/icons.py" = ["E501"]  # SVG path data reads worse when split
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "unit: L0 pure functions",
+    "component: L1 server loop over socketpair with a fake clock",
+    "integration: L2 real server on localhost plus bot clients",
+    "security: access control and abuse (AC, SE)",
+    "chaos: delay, duplicate, reorder, disconnect (CH)",
+    "perf: performance targets (PF)",
+    "lan: needs real machines; skipped by default",
+    "chat: chat and private messages (CT)",
+    "discovery: UDP discovery (DS)",
+    "persist: durable writes, save, recovery (SV)",
+    "export: export formats (EX), offscreen",
+    "ui: Qt widgets, offscreen",
+]

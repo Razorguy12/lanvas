@@ -1,0 +1,6 @@
+# Pinned per Agents.md section 3. Export uses Qt built-ins; crypto uses `cryptography`.
+PyQt6==6.10.2
+cryptography==45.0.7
+pytest==8.4.2
+ruff==0.14.5
+pyinstaller==6.16.0
