@@ -1,6 +1,6 @@
 # LANvas
 
-A Figma-style, offline, LAN-only collaborative whiteboard, built on raw TCP and UDP sockets with PyQt6.
+A Figma-style, offline, LAN-only collaborative whiteboard, built on raw TCP and UDP sockets with PyQt6.  
 The room creator decides who can view or edit. Boards on the network appear by themselves, and a crash costs nothing.
 
 - [`ProductContext.md`](ProductContext.md): what and why
