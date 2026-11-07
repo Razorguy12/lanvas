@@ -17,10 +17,8 @@ from PyQt6.QtWidgets import QApplication
 
 from client import theme
 from client.app import AppWindow
-from client.export.pdf import export_pdf
-from client.export.png import export_raster
+from client.export.formats import export_pdf, export_raster, export_svg
 from client.export.renderer import Scope, drive
-from client.export.svg import export_svg
 
 
 def _spin(app: QApplication, done: Callable[[], object], timeout: float = 10.0) -> bool:

@@ -101,7 +101,7 @@ Any change to framing, message types, op or chat schema, discovery payload, file
 |---|---|---|
 | Protocol & server core | Backend lead | `common/protocol.py`, `server/loop.py`, `oplog.py`, `chatstore.py` |
 | Access control & security | Security lead | `server/acl.py`, `common/identity.py`, `common/snapshot.py` (hashing, snapshots), TLS |
-| Persistence & recovery | Backend lead + Client-net lead | `server/persist.py`, `server/recovery.py`, `client/recovery.py` |
+| Persistence & recovery | Backend lead + Client-net lead | `server/persist.py`, `server/oplog.py`, `client/recovery.py` |
 | Client networking & models | Client-net lead | `client/net.py`, `document.py`, `chatmodel.py` |
 | Canvas, tools, panels, export UI | UI lead | `client/canvas/`, `client/panels/`, `client/export/`, `theme.py` |
 | Packaging, docs, discovery | Release lead | `build/`, `server/discovery.py`, `client/discovery.py`, PDF/PPT |

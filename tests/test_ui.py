@@ -17,10 +17,8 @@ from client.app import AppWindow
 from client.boardlist import BoardEntry
 from client.canvas.scene import BoardScene
 from client.discovery import DiscoveryWorker
-from client.export.pdf import export_pdf
-from client.export.png import export_raster, raster_size
+from client.export.formats import export_pdf, export_raster, export_svg, raster_size
 from client.export.renderer import SCOPE_FRAME, SCOPE_SELECTION, Scope, drive
-from client.export.svg import export_svg
 from client.request_screen import STATE_DENIED
 from common.model import Board, apply_op
 from common.protocol import MsgType

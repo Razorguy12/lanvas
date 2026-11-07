@@ -66,11 +66,10 @@ lanvas/
 │   ├─ loop.py          # selectors loop, Connection class
 │   ├─ rooms.py         # Room, membership, presence
 │   ├─ acl.py           # roles, requests, invites, rate limits
-│   ├─ oplog.py         # append-only log, seq, snapshots, checkpoints
+│   ├─ oplog.py         # append-only log, snapshots, checkpoints, startup recovery
 │   ├─ chatstore.py     # room chat + DM channels, history, retention
 │   ├─ discovery.py     # UDP announce/respond
-│   ├─ persist.py       # durable writer: atomic replace, fsync, checksums
-│   └─ recovery.py      # startup integrity scan and repair
+│   └─ persist.py       # room paths and durable writer helpers
 ├─ client/
 │   ├─ main.py
 │   ├─ transport.py     # NetCore: socket thread, handshake, reconnect, inspector, chaos (no Qt)
@@ -81,9 +80,9 @@ lanvas/
 │   ├─ document.py      # client-side model, optimistic apply, undo/redo
 │   ├─ chatmodel.py     # channels, history paging, unread counts, outbox
 │   ├─ recovery.py      # local journal, crash detection, recovery dialog data
-│   ├─ export/          # png.py, svg.py, pdf.py, lanvas.py (shared renderer)
+│   ├─ export/          # formats.py (PNG/JPEG/SVG/PDF), renderer.py
 │   ├─ canvas/          # view, items, tools (select, pen, shape, text…)
-│   ├─ panels/          # layers, properties, chat, users, inspector, access
+│   ├─ panels/          # layers, properties, chat, sharing, inspector
 │   └─ theme.py         # tokens from Design.md
 ├─ tests/
 ├─ docs/  (this file, Design.md, ProductContext.md, Agents.md)
@@ -413,7 +412,7 @@ The owner can browse checkpoints (Version history) and `restore` one (§5.2).
 
 ### 12.4 Recovery
 
-**Server startup integrity scan (`server/recovery.py`)**
+**Server startup integrity scan (`server/oplog.py`)**
 1. For each room, load `acl.json` and `room.json`; on parse failure, use `<name>.bak` (the previous atomic version is kept as `.bak`).
 2. Pick the newest snapshot or checkpoint whose SHA-256 verifies; skip any that fail and note them in `recovery.log`.
 3. Replay `ops.jsonl` lines with `seq` > snapshot seq while CRCs verify; truncate a torn tail.
