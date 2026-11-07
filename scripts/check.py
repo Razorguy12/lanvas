@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def run(args: list[str]) -> int:
     print("$", " ".join(args), flush=True)
-    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": str(ROOT)}
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
     return subprocess.run(args, cwd=ROOT, env=env).returncode
 
 

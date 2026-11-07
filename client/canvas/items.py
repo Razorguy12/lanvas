@@ -6,72 +6,74 @@ order decides is what appears on screen.
 
 from __future__ import annotations
 
-import base64
 import math
+from itertools import pairwise
 from typing import Any
 
-from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import (
-    QBrush,
-    QColor,
-    QFont,
-    QImage,
-    QPainter,
-    QPainterPath,
-    QPainterPathStroker,
-    QPen,
-    QPolygonF,
-)
-from PyQt6.QtWidgets import QGraphicsItem
-
 from client import theme
+from client.canvas.paint import Painter, Pen, decode_image, flatten, rounded_rect_points
+from client.geom import (
+    Affine,
+    Point,
+    Rect,
+    polygon_contains,
+    polygon_hits_rect,
+    segment_distance,
+    segment_hits_rect,
+)
 
 HIT_MARGIN = 6.0
 ARROW_SIZE = 12.0
 PIN_SIZE = 22.0
 
 
-def to_color(value: str | None) -> QColor | None:
-    if not value:
-        return None
-    color = QColor(value)
-    return color if color.isValid() else None
+def to_color(value: str | None) -> str | None:
+    return value if value and theme.valid_color(value) else None
 
 
-def text_font(props: dict[str, Any]) -> QFont:
-    font = QFont(theme.FONT_FAMILY)
-    font.setPixelSize(max(1, int(props.get("font_size", 16))))
-    font.setWeight(QFont.Weight(int(props.get("font_weight", 400))))
-    return font
+def font_props(props: dict[str, Any]) -> tuple[float, int]:
+    """(pixel size, weight) of a text or sticky object."""
+    return max(1.0, float(int(props.get("font_size", 16)))), int(props.get("font_weight", 400))
 
 
-def object_rect(obj: dict[str, Any]) -> QRectF:
+def object_rect(obj: dict[str, Any]) -> Rect:
     """Local-space rectangle of an object, used for selection and handles."""
     props = obj["props"]
     kind = obj["type"]
     if kind in ("line", "arrow"):
-        rect = QRectF(0, 0, props.get("x2", 0), props.get("y2", 0)).normalized()
-        return rect
+        return Rect(0, 0, props.get("x2", 0), props.get("y2", 0)).normalized()
     if kind == "comment":
-        return QRectF(0, -PIN_SIZE, PIN_SIZE, PIN_SIZE)
-    return QRectF(0, 0, props.get("w", 0), props.get("h", 0))
+        return Rect(0, -PIN_SIZE, PIN_SIZE, PIN_SIZE)
+    return Rect(0, 0, props.get("w", 0), props.get("h", 0))
 
 
-def flat_to_path(points: list[float], sx: float = 1.0, sy: float = 1.0) -> QPainterPath:
-    path = QPainterPath()
+def object_transform(obj: dict[str, Any]) -> Affine:
+    """Local object space to scene space. Rotation is about the rectangle's center."""
+    props = obj["props"]
+    center = object_rect(obj).center()
+    transform = Affine().translate(props.get("x", 0), props.get("y", 0))
+    if obj["type"] != "comment":
+        transform = transform.translate(center.x, center.y)
+        transform = transform.rotate(props.get("rotation", 0))
+        transform = transform.translate(-center.x, -center.y)
+    return transform
+
+
+def flat_to_path(points: list[float], sx: float = 1.0, sy: float = 1.0) -> list[tuple]:
+    """Path segments for a stroke. Quadratic segments through midpoints make the simplified
+    polyline look hand-drawn again."""
     if len(points) < 2:
-        return path
-    path.moveTo(points[0] * sx, points[1] * sy)
+        return []
+    path: list[tuple] = [("M", points[0] * sx, points[1] * sy)]
     if len(points) == 2:
-        path.lineTo(points[0] * sx + 0.01, points[1] * sy)  # a dot still needs a visible segment
+        path.append(("L", points[0] * sx + 0.01, points[1] * sy))  # a dot still needs a segment
         return path
-    # Quadratic segments through midpoints make the simplified polyline look hand-drawn again.
     for i in range(2, len(points) - 2, 2):
         cx, cy = points[i] * sx, points[i + 1] * sy
         mx = (points[i] + points[i + 2]) / 2 * sx
         my = (points[i + 1] + points[i + 3]) / 2 * sy
-        path.quadTo(cx, cy, mx, my)
-    path.lineTo(points[-2] * sx, points[-1] * sy)
+        path.append(("Q", cx, cy, mx, my))
+    path.append(("L", points[-2] * sx, points[-1] * sy))
     return path
 
 
@@ -80,16 +82,35 @@ def points_bbox(points: list[float]) -> tuple[float, float]:
     return max(xs) - min(xs), max(ys) - min(ys)
 
 
-class BoardItem(QGraphicsItem):
+def arrow_head(x2: float, y2: float, stroke_w: float) -> list[Point]:
+    angle = math.atan2(y2, x2)
+    size = max(ARROW_SIZE, stroke_w * 4)
+    return [
+        Point(x2, y2),
+        Point(x2 - size * math.cos(angle - 0.45), y2 - size * math.sin(angle - 0.45)),
+        Point(x2 - size * math.cos(angle + 0.45), y2 - size * math.sin(angle + 0.45)),
+    ]
+
+
+def comment_pin() -> list[Point]:
+    """A round pin whose bottom-left corner is square, pointing at the commented spot."""
+    return rounded_rect_points(Rect(0, -PIN_SIZE, PIN_SIZE, PIN_SIZE), 11,
+                               corners=(True, True, False, True))
+
+
+class BoardItem:
     def __init__(self, obj: dict[str, Any]) -> None:
-        super().__init__()
         self.obj = obj
-        self.clip_rect: QRectF | None = None
-        self._image: QImage | None = None
+        self.clip_rect: Rect | None = None
+        self.z = 0.0
+        self._image: Any = None
         self._image_key = ""
-        self._path: QPainterPath | None = None
-        self._bounds = QRectF()
-        self.setAcceptHoverEvents(False)
+        self._path: list[tuple] | None = None
+        self._bounds = Rect()
+        self._opacity = 1.0
+        self._visible = True
+        self._transform = Affine()
+        self._scene_bounds = Rect()
         self.sync(obj)
 
     @property
@@ -97,41 +118,65 @@ class BoardItem(QGraphicsItem):
         return self.obj["id"]
 
     def sync(self, obj: dict[str, Any]) -> None:
-        """Adopt new property values. prepareGeometryChange must come first, or Qt's index rots."""
-        self.prepareGeometryChange()
         self.obj = obj
         props = obj["props"]
         self._path = None
-        self.setPos(props.get("x", 0), props.get("y", 0))
+        self._transform = object_transform(obj)
+        self._opacity = props.get("opacity", 1)
+        self._visible = props.get("visible", True) and not obj["deleted"]
         rect = object_rect(obj)
-        self.setTransformOriginPoint(rect.center())
-        self.setRotation(props.get("rotation", 0) if obj["type"] not in ("comment",) else 0)
-        self.setOpacity(props.get("opacity", 1))
-        self.setVisible(props.get("visible", True) and not obj["deleted"])
         margin = props.get("stroke_w", 0) if props.get("stroke") else 0
         margin = margin / 2 + (ARROW_SIZE if obj["type"] == "arrow" else 0) + 1
-        self._bounds = rect.adjusted(-margin, -margin, margin, margin)
+        bounds = rect.adjusted(-margin, -margin, margin, margin)
         if obj["type"] == "frame":
-            self._bounds.setTop(self._bounds.top() - 18)  # room for the title above the frame
+            bounds = bounds.adjusted(0, -18, 0, 0)  # room for the title above the frame
+        if obj["type"] == "arrow":
+            stroke_w = props.get("stroke_w", 1)
+            reach = max(ARROW_SIZE, stroke_w * 4) + stroke_w
+            bounds = rect.adjusted(-reach, -reach, reach, reach)
+        self._bounds = bounds
+        self._scene_bounds = self._transform.map_rect(bounds)
         if obj["type"] == "image":
             self._load_image(props.get("image_data", ""))
-        self.update()
 
     def _load_image(self, data: str) -> None:
         key = str(hash(data))
-        if key == self._image_key:
-            return
-        self._image_key = key
-        self._image = QImage()
-        try:
-            self._image.loadFromData(base64.b64decode(data))
-        except ValueError:
-            self._image = QImage()
+        if key != self._image_key:
+            self._image_key = key
+            self._image = decode_image(data) if data else None
 
-    def boundingRect(self) -> QRectF:  # noqa: N802 (Qt override)
+    # -------------------------------------------------------------- Qt-like item queries
+    def isVisible(self) -> bool:  # noqa: N802
+        return self._visible
+
+    def opacity(self) -> float:
+        return self._opacity
+
+    def setOpacity(self, value: float) -> None:  # noqa: N802 (live preview from a slider)
+        self._opacity = value
+
+    def zValue(self) -> float:  # noqa: N802
+        return self.z
+
+    def setZValue(self, z: float) -> None:  # noqa: N802
+        self.z = z
+
+    def x(self) -> float:
+        return float(self.obj["props"].get("x", 0))
+
+    def y(self) -> float:
+        return float(self.obj["props"].get("y", 0))
+
+    def boundingRect(self) -> Rect:  # noqa: N802
         return self._bounds
 
-    def _stroke_path(self) -> QPainterPath:
+    def sceneTransform(self) -> Affine:  # noqa: N802
+        return self._transform
+
+    def sceneBoundingRect(self) -> Rect:  # noqa: N802
+        return self._scene_bounds
+
+    def stroke_path(self) -> list[tuple]:
         if self._path is None:
             props = self.obj["props"]
             points = props.get("points", [])
@@ -141,138 +186,149 @@ class BoardItem(QGraphicsItem):
             self._path = flat_to_path(points, sx, sy)
         return self._path
 
-    def shape(self) -> QPainterPath:
+    # -------------------------------------------------------------- hit testing (Qt's shape())
+    def _local(self, p: Point) -> Point | None:
+        inverse, ok = self._transform.inverted()
+        return inverse.map(p) if ok else None
+
+    def _hit_width(self) -> float:
+        return max(self.obj["props"].get("stroke_w", 1), 1) + HIT_MARGIN
+
+    def contains(self, scene_point: Point, radius: float = 0.0) -> bool:
+        """Whether the item's shape contains the point, or comes within ``radius`` of it."""
+        if not self._visible or not self.sceneBoundingRect().adjusted(
+                -radius, -radius, radius, radius).contains(scene_point):
+            return False
+        local = self._local(scene_point)
+        if local is None:
+            return False
         kind = self.obj["type"]
-        props = self.obj["props"]
-        stroker = QPainterPathStroker()
-        stroker.setWidth(max(props.get("stroke_w", 1), 1) + HIT_MARGIN)
+        scale = self._transform.scale_factor() or 1.0
+        reach = self._hit_width() / 2 + radius / scale
         if kind == "path":
-            return stroker.createStroke(self._stroke_path())
+            pts = flatten(self.stroke_path(), 6)
+            if len(pts) == 1:
+                return math.hypot(local.x - pts[0].x, local.y - pts[0].y) <= reach
+            return any(segment_distance(local, a, b) <= reach for a, b in pairwise(pts))
         if kind in ("line", "arrow"):
-            path = QPainterPath()
-            path.moveTo(0, 0)
-            path.lineTo(props.get("x2", 0), props.get("y2", 0))
-            return stroker.createStroke(path)
-        path = QPainterPath()
+            props = self.obj["props"]
+            end = Point(props.get("x2", 0), props.get("y2", 0))
+            return segment_distance(local, Point(0, 0), end) <= reach
+        rect = object_rect(self.obj)
+        grow = radius / scale
+        if kind == "ellipse":
+            rx, ry = rect.w / 2 + grow, rect.h / 2 + grow
+            if rx <= 0 or ry <= 0:
+                return False
+            c = rect.center()
+            return ((local.x - c.x) / rx) ** 2 + ((local.y - c.y) / ry) ** 2 <= 1
+        return rect.adjusted(-grow, -grow, grow, grow).contains(local)
+
+    def intersects(self, scene_rect: Rect) -> bool:
+        """Whether the item's shape touches the rectangle (Qt's IntersectsItemShape)."""
+        if not self._visible or not self.sceneBoundingRect().intersects(scene_rect):
+            return False
+        kind = self.obj["type"]
+        if kind in ("path", "line", "arrow"):
+            if kind == "path":
+                pts = [self._transform.map(p) for p in flatten(self.stroke_path(), 6)]
+            else:
+                props = self.obj["props"]
+                pts = [self._transform.map(Point(0, 0)),
+                       self._transform.map(Point(props.get("x2", 0), props.get("y2", 0)))]
+            if len(pts) == 1:
+                return scene_rect.contains(pts[0])
+            return any(segment_hits_rect(a, b, scene_rect) for a, b in pairwise(pts))
         rect = object_rect(self.obj)
         if kind == "ellipse":
-            path.addEllipse(rect)
-        else:
-            path.addRect(rect)
-        return path
+            from client.canvas.paint import ellipse_points
 
-    def _pen(self) -> QPen:
+            poly = [self._transform.map(p) for p in ellipse_points(rect, 32)]
+        else:
+            poly = self._transform.map_polygon(rect)
+        return polygon_hits_rect(poly, scene_rect) or polygon_contains(poly, scene_rect.center())
+
+    # -------------------------------------------------------------- painting
+    def _pen(self) -> Pen | None:
         props = self.obj["props"]
         color = to_color(props.get("stroke"))
-        if color is None:
-            return QPen(Qt.PenStyle.NoPen)
-        pen = QPen(color, props.get("stroke_w", 1))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        return pen
+        return Pen(color, props.get("stroke_w", 1)) if color else None
 
-    def _brush(self) -> QBrush:
-        color = to_color(self.obj["props"].get("fill"))
-        return QBrush(color) if color else QBrush(Qt.BrushStyle.NoBrush)
+    def _brush(self) -> str | None:
+        return to_color(self.obj["props"].get("fill"))
 
-    def paint(self, painter: QPainter, option: Any = None, widget: Any = None) -> None:
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self.clip_rect is not None:
-            # Painted rather than via parent-child items, so moving an object never reparents it.
-            painter.setClipRect(self.mapRectFromScene(self.clip_rect))
-        kind = self.obj["type"]
-        painter.setPen(self._pen())
-        painter.setBrush(self._brush())
-        getattr(self, f"_paint_{kind}", self._paint_rect)(painter)
+    def paint_with(self, painter: Painter, base: Affine | None = None) -> None:
+        transform = self._transform if base is None else self._transform.then(base)
+        clip = self.clip_rect
+        if not painter.begin_item(transform, self._opacity, self.sceneBoundingRect(), clip):
+            return
+        try:
+            self.paint(painter)
+        finally:
+            painter.end_item()
 
-    def _paint_rect(self, painter: QPainter) -> None:
-        painter.drawRect(object_rect(self.obj))
+    def paint(self, painter: Painter) -> None:
+        getattr(self, f"_paint_{self.obj['type']}", self._paint_rect)(painter)
 
-    def _paint_ellipse(self, painter: QPainter) -> None:
-        painter.drawEllipse(object_rect(self.obj))
+    def _paint_rect(self, painter: Painter) -> None:
+        painter.rect(object_rect(self.obj), self._pen(), self._brush())
 
-    def _paint_frame(self, painter: QPainter) -> None:
-        painter.drawRect(object_rect(self.obj))
-        painter.setPen(QColor("#6B6B6B"))
-        font = QFont(theme.FONT_FAMILY)
-        font.setPixelSize(11)
-        painter.setFont(font)
+    def _paint_ellipse(self, painter: Painter) -> None:
+        painter.ellipse(object_rect(self.obj), self._pen(), self._brush())
+
+    def _paint_frame(self, painter: Painter) -> None:
+        painter.rect(object_rect(self.obj), self._pen(), self._brush())
         name = self.obj["props"].get("name") or "Frame"
-        painter.drawText(QPointF(0, -5), name)
+        painter.text_at(Point(0, -5), name, 11, 400, "#6B6B6B")
 
-    def _paint_group(self, painter: QPainter) -> None:
+    def _paint_group(self, painter: Painter) -> None:
         return  # a group has no appearance of its own; only its selection outline is drawn
 
-    def _paint_line(self, painter: QPainter) -> None:
+    def _paint_line(self, painter: Painter) -> None:
         props = self.obj["props"]
-        painter.drawLine(QPointF(0, 0), QPointF(props.get("x2", 0), props.get("y2", 0)))
+        pen = self._pen()
+        if pen is not None:
+            painter.polyline([Point(0, 0), Point(props.get("x2", 0), props.get("y2", 0))], pen)
 
-    def _paint_arrow(self, painter: QPainter) -> None:
+    def _paint_arrow(self, painter: Painter) -> None:
         props = self.obj["props"]
         x2, y2 = props.get("x2", 0), props.get("y2", 0)
-        painter.drawLine(QPointF(0, 0), QPointF(x2, y2))
-        angle = math.atan2(y2, x2)
-        size = max(ARROW_SIZE, props.get("stroke_w", 1) * 4)
-        head = QPolygonF(
-            [
-                QPointF(x2, y2),
-                QPointF(x2 - size * math.cos(angle - 0.45), y2 - size * math.sin(angle - 0.45)),
-                QPointF(x2 - size * math.cos(angle + 0.45), y2 - size * math.sin(angle + 0.45)),
-            ]
-        )
-        painter.setBrush(QBrush(to_color(props.get("stroke")) or QColor("#1E1E1E")))
-        painter.drawPolygon(head)
+        pen = self._pen()
+        if pen is not None:
+            painter.polyline([Point(0, 0), Point(x2, y2)], pen)
+        head_color = to_color(props.get("stroke")) or "#1E1E1E"
+        painter.polygon(arrow_head(x2, y2, props.get("stroke_w", 1)), pen, head_color)
 
-    def _paint_path(self, painter: QPainter) -> None:
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(self._stroke_path())
+    def _paint_path(self, painter: Painter) -> None:
+        pen = self._pen()
+        if pen is not None:
+            painter.path(self.stroke_path(), pen)
 
-    def _paint_text(self, painter: QPainter) -> None:
+    def _paint_text(self, painter: Painter) -> None:
         props = self.obj["props"]
-        painter.setPen(to_color(props.get("fill")) or QColor("#1E1E1E"))
-        painter.setFont(text_font(props))
-        rect = object_rect(self.obj)
-        flags = Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-        painter.drawText(rect, int(flags), props.get("text", ""))
+        size, weight = font_props(props)
+        color = to_color(props.get("fill")) or "#1E1E1E"
+        painter.text(object_rect(self.obj), props.get("text", ""), size, weight, color)
 
-    def _paint_sticky(self, painter: QPainter) -> None:
+    def _paint_sticky(self, painter: Painter) -> None:
         props = self.obj["props"]
         rect = object_rect(self.obj)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(to_color(props.get("fill")) or QColor(theme.STICKY_COLOR)))
-        painter.drawRoundedRect(rect, 4, 4)
-        painter.setPen(QColor("#1E1E1E"))
-        painter.setFont(text_font(props))
-        inner = rect.adjusted(10, 10, -10, -10)
-        flags = Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-        painter.drawText(inner, int(flags), props.get("text", ""))
+        painter.rect(rect, None, to_color(props.get("fill")) or theme.STICKY_COLOR, radius=4)
+        size, weight = font_props(props)
+        painter.text(rect.adjusted(10, 10, -10, -10), props.get("text", ""), size, weight,
+                     "#1E1E1E")
 
-    def _paint_image(self, painter: QPainter) -> None:
+    def _paint_image(self, painter: Painter) -> None:
         rect = object_rect(self.obj)
-        if self._image is not None and not self._image.isNull():
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            painter.drawImage(rect, self._image)
+        if self._image is not None:
+            painter.image(rect, self._image, self.obj["props"].get("image_data", ""))
         else:
-            painter.setPen(QPen(QColor("#B3B3B3"), 1, Qt.PenStyle.DashLine))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(rect)
+            painter.rect(rect, Pen("#B3B3B3", 1, dash=(4, 2)), None)
 
-    def _paint_comment(self, painter: QPainter) -> None:
+    def _paint_comment(self, painter: Painter) -> None:
         props = self.obj["props"]
-        color = QColor("#14AE5C") if props.get("resolved") else QColor("#FFA629")
-        painter.setPen(QPen(QColor("#FFFFFF"), 1.5))
-        painter.setBrush(color)
-        path = QPainterPath()
-        path.setFillRule(Qt.FillRule.WindingFill)  # the overlap is solid, not a hole
-        path.addRoundedRect(QRectF(0, -PIN_SIZE, PIN_SIZE, PIN_SIZE), 11, 11)
-        path.addRect(QRectF(0, -11, 11, 11))
-        painter.drawPath(path.simplified())
-        painter.setPen(QColor("#1E1E1E"))
-        font = QFont(theme.FONT_FAMILY)
-        font.setPixelSize(11)
-        font.setWeight(QFont.Weight.DemiBold)
-        painter.setFont(font)
+        color = "#14AE5C" if props.get("resolved") else "#FFA629"
+        painter.polygon(comment_pin(), Pen("#FFFFFF", 1.5), color)
         initial = (props.get("author") or "?")[:1].upper()
-        painter.drawText(
-            QRectF(0, -PIN_SIZE, PIN_SIZE, PIN_SIZE), int(Qt.AlignmentFlag.AlignCenter), initial
-        )
+        painter.text(Rect(0, -PIN_SIZE, PIN_SIZE, PIN_SIZE), initial, 11, 600, "#1E1E1E",
+                     align="center", valign="center", wrap=False)

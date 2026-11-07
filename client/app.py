@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import logging
+import tkinter as tk
 from pathlib import Path
+from tkinter import filedialog
 from typing import Any
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QStackedWidget
-
-from client import dialogs, paths
+from client import dialogs, paths, theme
 from client.boardlist import BoardEntry
 from client.boardpage import BoardPage
 from client.discovery import DiscoveryWorker
@@ -18,7 +17,7 @@ from client.net import NetWorker
 from client.recovery import CrashedSession, discard_crashed, find_crashed
 from client.request_screen import STATE_DENIED, RequestAccessPage
 from client.session import Session
-from client.widgets import ToastHost
+from client.widgets import ToastHost, after_ms, install_ui_queue, warn
 from common import durable
 from common.fileformat import (
     FileError,
@@ -49,17 +48,61 @@ ERROR_TEXT = {
 }
 
 
-class AppWindow(QMainWindow, ToastHost):
-    def __init__(self, udp_port: int = UDP_PORT, start_discovery: bool = True) -> None:
-        super().__init__()
-        self.setWindowTitle("LANvas")
-        self.resize(1360, 860)
+class Stack(tk.Frame):
+    """Pages on top of each other; only the current one is laid out (QStackedWidget)."""
+
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, background=theme.current().bg_app)
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.pages: list[tk.Misc] = []
+        self.current: tk.Misc | None = None
+
+    def addWidget(self, page: Any) -> None:  # noqa: N802
+        self.pages.append(page)
+        if self.current is None:
+            self.setCurrentWidget(page)
+        else:
+            page._vis = False
+
+    def removeWidget(self, page: Any) -> None:  # noqa: N802
+        if page in self.pages:
+            self.pages.remove(page)
+        page.grid_forget()
+        if self.current is page:
+            self.current = None
+
+    def setCurrentWidget(self, page: Any) -> None:  # noqa: N802
+        if page is self.current:
+            return
+        if self.current is not None:
+            self.current.grid_remove()
+            self.current._vis = False
+        page._vis = True
+        page.grid(row=0, column=0, sticky="nsew")
+        self.current = page
+
+    def currentWidget(self) -> Any:  # noqa: N802
+        return self.current
+
+
+class AppWindow(tk.Tk, ToastHost):
+    def __init__(self, udp_port: int = UDP_PORT, start_discovery: bool = True,
+                 dark: bool = False) -> None:
+        theme.load_fonts()  # before Tk starts, so Tk's font machinery sees the bundled fonts
+        super().__init__(className="LANvas")
+        theme.apply(self, dark=dark)
+        install_ui_queue(self)
+        self.title("LANvas")
+        self.geometry("1360x860")
+        self.minsize(900, 560)
+        self.protocol("WM_DELETE_WINDOW", self.close)
         self.identity = Identity.load_or_create(paths.identity_file())
         self.settings = self._load_settings()
-        self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
-        self.launcher = LauncherPage(self.settings.get("username", ""))
-        self.request_page = RequestAccessPage()
+        self.stack = Stack(self)
+        self.stack.pack(fill="both", expand=True)
+        self.launcher = LauncherPage(self.stack, self.settings.get("username", ""))
+        self.request_page = RequestAccessPage(self.stack)
         self.stack.addWidget(self.launcher)
         self.stack.addWidget(self.request_page)
         self.session: Session | None = None
@@ -179,14 +222,15 @@ class AppWindow(QMainWindow, ToastHost):
             lambda: session.hello_fields(self.hello),
             self._on_net_event,
         )
-        self.board = BoardPage(session, lambda: self.net.core if self.net else None, self.discovery)
+        self.board = BoardPage(self.stack, session, lambda: self.net.core if self.net else None,
+                               self.discovery)
         self.board.boards = self.boards
         self.board.leave_requested.connect(self.leave)
         self.board.switch_requested.connect(self.join_board)
         self.board.open_file_requested.connect(self.open_file)
         self.stack.addWidget(self.board)
         self.net.start()
-        QTimer.singleShot(CONNECT_GIVE_UP_MS, lambda s=session: self._connect_timed_out(s))
+        after_ms(self, CONNECT_GIVE_UP_MS, lambda s=session: self._connect_timed_out(s))
 
     def _connect_timed_out(self, session: Session) -> None:
         """Without this, an unreachable address would look like an app that ignored the click."""
@@ -241,7 +285,7 @@ class AppWindow(QMainWindow, ToastHost):
         if self.board is None or self.session is None:
             return
         self.stack.setCurrentWidget(self.board)
-        self.setWindowTitle(f"{self.session.room.get('name', '')} — LANvas")
+        self.title(f"{self.session.room.get('name', '')} — LANvas")
         if self.adopting is not None:
             self._forget_adopted()
         if self.seed_objects is not None and kw.get("first"):
@@ -295,12 +339,12 @@ class AppWindow(QMainWindow, ToastHost):
         if self.board is not None:
             self.board.shutdown()
             self.stack.removeWidget(self.board)
-            self.board.deleteLater()
+            self.board.destroy()
             self.board = None
 
     def _back_to_launcher(self, message: str = "") -> None:
         self._leave_current()
-        self.setWindowTitle("LANvas")
+        self.title("LANvas")
         self.stack.setCurrentWidget(self.launcher)
         self.launcher.show_message(message)
 
@@ -339,11 +383,12 @@ class AppWindow(QMainWindow, ToastHost):
         self._show_recovery_banner()
 
     def _save_recovered(self, crashed: CrashedSession) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save recovered board",
-            f"{crashed.room_name or 'recovered'}.lanvas",
-            "LANvas board (*.lanvas)",
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save recovered board",
+            initialfile=f"{crashed.room_name or 'recovered'}.lanvas",
+            defaultextension=".lanvas",
+            filetypes=[("LANvas board", "*.lanvas")],
         )
         if not path:
             return
@@ -358,13 +403,15 @@ class AppWindow(QMainWindow, ToastHost):
         try:
             durable.atomic_write(Path(path), encode_lanvas(document))
         except OSError as exc:
-            QMessageBox.warning(self, "Save failed", str(exc))
+            warn(self, "Save failed", str(exc))
             return
         self._discard(crashed)
 
     # ------------------------------------------------------------------ files
     def open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open", "", "LANvas board (*.lanvas)")
+        path = filedialog.askopenfilename(
+            parent=self, title="Open", filetypes=[("LANvas board", "*.lanvas")]
+        )
         if path:
             self.open_path(Path(path))
 
@@ -382,7 +429,7 @@ class AppWindow(QMainWindow, ToastHost):
         try:
             raw = path.read_bytes()
         except OSError as exc:
-            QMessageBox.warning(self, "Open", f"Could not read the file: {exc}")
+            warn(self, "Open", f"Could not read the file: {exc}")
             return None
         password: str | None = None
         while True:
@@ -397,15 +444,14 @@ class AppWindow(QMainWindow, ToastHost):
                 if password is None:
                     return None
             except FileError as exc:
-                QMessageBox.warning(self, "Open", f"⚠ This file was modified or is damaged. {exc}")
+                warn(self, "Open", f"⚠ This file was modified or is damaged. {exc}")
                 return None
 
     # ------------------------------------------------------------------ window
-    def resizeEvent(self, event: Any) -> None:  # noqa: N802 (Qt override)
-        super().resizeEvent(event)
-        self.layout_toasts()
-
-    def closeEvent(self, event: Any) -> None:  # noqa: N802 (Qt override)
+    def close(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         self._leave_current()
         self.discovery.stop()
-        super().closeEvent(event)
+        self.destroy()

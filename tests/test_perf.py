@@ -107,7 +107,7 @@ def _session():
 def test_PF_03_load_1000_object_snapshot_under_one_second(qapp):
     board = _big_board()
     session = _session()
-    canvas = CanvasView(session)
+    canvas = CanvasView(session, qapp)
     start = time.perf_counter()
     session.doc.load_snapshot(board.to_json(), 1000)
     canvas.sync(None)
@@ -118,24 +118,29 @@ def test_PF_03_load_1000_object_snapshot_under_one_second(qapp):
 
 
 def test_PF_04_pan_zoom_frame_rate_software_baseline(qapp):
-    """Software rendering offscreen: a floor. A real display and GPU still need checking by eye."""
+    """Software rendering: a floor. Frames rendered while panning or zooming use the fast path
+    (no supersampling); one anti-aliased frame follows when the motion stops."""
+    import tkinter as tk
+
     session = _session()
-    canvas = CanvasView(session)
+    window = tk.Toplevel(qapp)
+    window.geometry("1280x800")
+    canvas = CanvasView(session, window)
+    canvas.pack(fill="both", expand=True)
     session.doc.load_snapshot(_big_board().to_json(), 1000)
     canvas.sync(None)
-    canvas.resize(1280, 800)
-    canvas.show()
+    window.update()
     canvas.zoom_fit()
     frames = 60
     start = time.perf_counter()
     for i in range(frames):
         canvas.zoom_to(0.3 + (i % 10) * 0.02)
         canvas.translate(2, 1)
-        canvas.grab()
+        canvas.render_now(supersample=1)
     fps = frames / (time.perf_counter() - start)
     print(f"\n{fps:.0f} fps")
     assert fps >= 30
-    canvas.close()
+    window.destroy()
     session.close()
 
 

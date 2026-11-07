@@ -2,57 +2,46 @@
 
 from __future__ import annotations
 
-import html
+import tkinter as tk
 from typing import Any
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
-    QCheckBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QPushButton,
-    QTextBrowser,
-    QVBoxLayout,
-    QWidget,
+from client.widgets import (
+    Button,
+    CheckBox,
+    Frame,
+    Label,
+    LineEdit,
+    ListWidget,
+    TextView,
+    section_label,
 )
 
-from client import theme
-from client.widgets import section_label
 
-
-class CommentsPanel(QWidget):
-    def __init__(self, canvas: Any) -> None:
-        super().__init__()
+class CommentsPanel(Frame):
+    def __init__(self, master: tk.Misc, canvas: Any) -> None:
+        super().__init__(master, "panel", padding=12)
         self.canvas = canvas
         self.current: str | None = None
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.addWidget(section_label("Comments"))
-        self.show_resolved = QCheckBox("Show resolved")
-        self.show_resolved.toggled.connect(self.refresh)
-        root.addWidget(self.show_resolved)
-        self.list = QListWidget()
-        self.list.setMaximumHeight(180)
+        section_label(self, "Comments").pack(anchor="w")
+        self.show_resolved = CheckBox(self, "Show resolved", panel=True)
+        self.show_resolved.toggled.connect(lambda *_: self.refresh())
+        self.show_resolved.pack(anchor="w", pady=(6, 4))
+        self.list = ListWidget(self, height=7)
         self.list.itemClicked.connect(self._clicked)
-        root.addWidget(self.list)
-        self.hint = QLabel("Press C, then click the canvas to pin a comment.")
-        self.hint.setObjectName("muted")
-        self.hint.setWordWrap(True)
-        root.addWidget(self.hint)
-        self.thread = QTextBrowser()
-        root.addWidget(self.thread, 1)
-        row = QHBoxLayout()
-        self.reply = QLineEdit()
-        self.reply.setPlaceholderText("Reply…")
+        self.list.pack(fill="x")
+        self.hint = Label(self, "Press C, then click the canvas to pin a comment.", "panelmuted",
+                          wraplength=240, justify="left")
+        self.hint.pack(anchor="w", pady=4)
+        self.thread = TextView(self)
+        self.thread.pack(fill="both", expand=True, pady=(4, 4))
+        row = Frame(self, "panel")
+        row.pack(fill="x")
+        self.reply = LineEdit(row, placeholder="Reply…")
         self.reply.returnPressed.connect(self._send_reply)
-        row.addWidget(self.reply, 1)
-        self.resolve = QPushButton("Resolve")
+        self.reply.pack(side="left", fill="x", expand=True)
+        self.resolve = Button(row, "Resolve")
         self.resolve.clicked.connect(self._toggle_resolved)
-        row.addWidget(self.resolve)
-        root.addLayout(row)
+        self.resolve.pack(side="left", padx=(6, 0))
         self.refresh()
 
     def _comments(self) -> list[dict[str, Any]]:
@@ -70,16 +59,14 @@ class CommentsPanel(QWidget):
                 continue
             mark = "✓ " if props.get("resolved") else ""
             first_line = props.get("text", "").split("\n")[0][:40]
-            item = QListWidgetItem(f"{mark}{props.get('author', '?')}: {first_line}")
-            item.setData(Qt.ItemDataRole.UserRole, comment["id"])
-            self.list.addItem(item)
-            item.setSelected(comment["id"] == self.current)
+            self.list.addItem(f"{mark}{props.get('author', '?')}: {first_line}", comment["id"],
+                              selected=comment["id"] == self.current)
         self.hint.setVisible(self.list.count() == 0)
         self._render_thread()
 
-    def _clicked(self, item: QListWidgetItem) -> None:
-        self.current = item.data(Qt.ItemDataRole.UserRole)
-        comment = self.canvas.doc().view.get_live(self.current)
+    def _clicked(self, obj_id: str | None) -> None:
+        self.current = obj_id
+        comment = self.canvas.doc().view.get_live(self.current) if obj_id else None
         if comment is not None:
             self.canvas.centerOn(comment["props"].get("x", 0), comment["props"].get("y", 0))
         self._render_thread()
@@ -89,24 +76,19 @@ class CommentsPanel(QWidget):
         can_edit = self.canvas.can_edit()
         self.reply.setEnabled(comment is not None and can_edit)
         self.resolve.setEnabled(comment is not None and can_edit)
-        if comment is None:
-            self.thread.setHtml("")
-            return
-        props = comment["props"]
-        self.resolve.setText("Reopen" if props.get("resolved") else "Resolve")
-        muted = theme.current().text_muted
-        # Comment text comes from other users, so it is escaped before being rendered as HTML.
-        parts = [
-            f"<p><b>{html.escape(props.get('author', '?'))}</b><br>"
-            f"{html.escape(props.get('text', '')).replace(chr(10), '<br>')}</p>"
-        ]
-        for reply in props.get("replies", []):
-            parts.append(
-                f"<p><b>{html.escape(reply.get('author', '?'))}</b> "
-                f"<span style='color:{muted}'>{html.escape(reply.get('ts', ''))}</span><br>"
-                f"{html.escape(reply.get('text', '')).replace(chr(10), '<br>')}</p>"
-            )
-        self.thread.setHtml("".join(parts))
+        view = self.thread
+        view.begin()
+        if comment is not None:
+            props = comment["props"]
+            self.resolve.setText("Reopen" if props.get("resolved") else "Resolve")
+            # Comment text comes from other users, so it is inserted as plain text, never markup.
+            view.write(props.get("author", "?") + "\n", "bold")
+            view.write(props.get("text", "") + "\n\n")
+            for reply in props.get("replies", []):
+                view.write(reply.get("author", "?"), "bold")
+                view.write(" " + reply.get("ts", "") + "\n", "muted")
+                view.write(reply.get("text", "") + "\n\n")
+        view.end()
 
     def _send_reply(self) -> None:
         text = self.reply.text().strip()

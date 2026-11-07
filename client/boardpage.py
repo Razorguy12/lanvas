@@ -2,29 +2,20 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import logging
+import os
+import subprocess
+import sys
 import time
+import tkinter as tk
 from collections.abc import Callable
 from pathlib import Path
+from tkinter import filedialog, ttk
 from typing import Any
 
-from PyQt6.QtCore import QBuffer, QIODevice, QObject, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QGuiApplication, QImage, QKeySequence, QShortcut
-from PyQt6.QtWidgets import (
-    QButtonGroup,
-    QFileDialog,
-    QHBoxLayout,
-    QLabel,
-    QMenu,
-    QMessageBox,
-    QProgressDialog,
-    QPushButton,
-    QSplitter,
-    QTabWidget,
-    QToolButton,
-    QVBoxLayout,
-    QWidget,
-)
+from PIL import Image
 
 from client import dialogs, icons, theme
 from client.boardlist import BoardEntry
@@ -56,7 +47,19 @@ from client.session import (
     SAVE_SAVED,
     SAVE_SAVING,
 )
-from client.widgets import Avatar, ColorButton
+from client.widgets import (
+    Avatar,
+    Button,
+    ColorButton,
+    Frame,
+    Label,
+    Signal,
+    ToolButton,
+    after_ms,
+    ask_yes_no,
+    call_in_ui,
+    popup_menu,
+)
 from common import durable
 from common.identity import short_fingerprint
 from common.model import MAX_IMAGE_B64
@@ -94,281 +97,284 @@ OP_REJECT_TEXT = {
 MAX_IMAGE_SIDE = 1600
 ESTIMATE_BYTES_PER_PIXEL = 0.5
 EXPORT_TICK_MS = 0
+TYPING_CLASSES = ("Entry", "TEntry", "Text", "Spinbox", "TSpinbox", "TCombobox")
+SPECIAL_KEYS = {
+    "Del": "Delete", "Backspace": "BackSpace", "]": "bracketright", "[": "bracketleft",
+    "\\": "backslash", "1": "1", "0": "0",
+}
 
 
-class Exporter(QObject):
+def key_sequences(keys: str) -> list[str]:
+    """A Qt-style shortcut ("Ctrl+Shift+Z") as Tk event sequences."""
+    *mods, key = keys.split("+")
+    shift = "Shift" in mods
+    tk_mods = [{"Ctrl": "Control", "Alt": "Alt"}[m] for m in mods if m != "Shift"]
+    if key in SPECIAL_KEYS:
+        name = SPECIAL_KEYS[key]
+        if shift and key == "1":
+            return ["<KeyPress-exclam>"]  # Shift+1 arrives as "!"
+        prefix = "-".join(tk_mods + (["Shift"] if shift else []))
+        return [f"<{prefix}-{name}>" if prefix else f"<KeyPress-{name}>"]
+    letter = key.upper() if shift else key.lower()
+    prefix = "-".join(tk_mods)
+    return [f"<{prefix}-{letter}>" if prefix else f"<KeyPress-{letter}>"]
+
+
+class Exporter:
     """Runs a chunked render on the UI thread between events, then writes the file off-thread."""
 
-    finished = pyqtSignal(str, str)  # path, error
-
-    def __init__(self, parent: QWidget, io: IoWorker) -> None:
-        super().__init__(parent)
+    def __init__(self, parent: tk.Misc, io_worker: IoWorker) -> None:
         self.parent_widget = parent
-        self.io = io
-        self.timer = QTimer(self)
-        self.timer.setInterval(EXPORT_TICK_MS)
-        self.timer.timeout.connect(self._step)
+        self.io = io_worker
+        self.finished = Signal()  # path, error
         self.steps: Any = None
         self.path = Path()
         self.total = 0
-        self.progress: QProgressDialog | None = None
+        self.progress: tk.Toplevel | None = None
+        self.bar: ttk.Progressbar | None = None
 
     def start(self, steps: Any, path: Path, total: int) -> None:
         self.steps = steps
         self.path = path
         self.total = max(total, 1)
         if total >= 200:
-            self.progress = QProgressDialog("Exporting…", "", 0, self.total, self.parent_widget)
-            self.progress.setCancelButton(None)
-            self.progress.setWindowModality(Qt.WindowModality.NonModal)
-            self.progress.show()
-        self.timer.start()
+            self.progress = tk.Toplevel(self.parent_widget)
+            self.progress.title("Exporting…")
+            self.progress.transient(self.parent_widget.winfo_toplevel())
+            Label(self.progress, "Exporting…").pack(padx=16, pady=(12, 4))
+            self.bar = ttk.Progressbar(self.progress, length=280, maximum=self.total)
+            self.bar.pack(padx=16, pady=(0, 14))
+        after_ms(self.parent_widget, EXPORT_TICK_MS, self._step)
 
     def _step(self) -> None:
         try:
             done = next(self.steps)
-            if self.progress is not None:
-                self.progress.setValue(min(done, self.total))
+            if self.bar is not None:
+                self.bar.configure(value=min(done, self.total))
+            after_ms(self.parent_widget, EXPORT_TICK_MS, self._step)
         except StopIteration as stop:
-            self.timer.stop()
             self._close_progress()
             self.write(stop.value, self.path)
         except ExportError as exc:
-            self.timer.stop()
             self._close_progress()
             self.finished.emit(str(self.path), str(exc))
 
     def _close_progress(self) -> None:
         if self.progress is not None:
-            self.progress.close()
+            self.progress.destroy()
             self.progress = None
+            self.bar = None
 
     def write(self, data: bytes, path: Path) -> None:
         def job() -> None:
             try:
                 durable.atomic_write(path, data)
-                self.finished.emit(str(path), "")
+                call_in_ui(lambda: self.finished.emit(str(path), ""))
             except OSError as exc:
-                self.finished.emit(str(path), str(exc))
+                error = str(exc)
+                call_in_ui(lambda: self.finished.emit(str(path), error))
 
         self.io.submit(job)
 
 
-class BoardPage(QWidget):
-    leave_requested = pyqtSignal()
-    switch_requested = pyqtSignal(object, str)
-    open_file_requested = pyqtSignal()
-
-    def __init__(self, session: Any, get_core: Callable[[], Any], discovery: Any) -> None:
-        super().__init__()
+class BoardPage(Frame):
+    def __init__(self, master: tk.Misc, session: Any, get_core: Callable[[], Any],
+                 discovery: Any) -> None:
+        super().__init__(master, "page")
+        self.leave_requested = Signal()
+        self.switch_requested = Signal()
+        self.open_file_requested = Signal()
         self.session = session
         self.get_core = get_core
         self.discovery = discovery
         self.boards: list[BoardEntry] = []
         self.access_dialog: AccessDialog | None = None
         self._request_toasts: dict[str, Any] = {}
-        self.setObjectName("page")
+        self._popover: PeoplePopover | None = None
+        self._bound: list[str] = []
         self.io = IoWorker()
         self.exporter = Exporter(self, self.io)
-        self.exporter.finished.connect(self._export_finished, Qt.ConnectionType.QueuedConnection)
-        self.canvas = CanvasView(session, self)
-        self.canvas.comment_requested.connect(self._open_comment)
-        self.tool_buttons: dict[str, QToolButton] = {}
+        self.exporter.finished.connect(self._export_finished)
+        self.tool_buttons: dict[str, ToolButton] = {}
         self._build()
         self._bind_shortcuts()
+        self.canvas.comment_requested.connect(self._open_comment)
         self.canvas.tool_changed.connect(self._tool_changed)
         self.canvas.zoom_changed.connect(lambda f: self.zoom_button.setText(f"{f * 100:.0f}%"))
         self.canvas.selection_changed.connect(self._status_refresh)
-        self.clock = QTimer(self)
-        self.clock.setInterval(1000)
-        self.clock.timeout.connect(self._second)
-        self.clock.start()
         self.rtt: float | None = None
         self.conn_state = "connecting"
+        self._clock: str | None = after_ms(self, 1000, self._second)
         self.apply_role()
 
     # ------------------------------------------------------------------ construction
     def _build(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        t = theme.current()
         self.topbar = self._build_topbar()
-        root.addWidget(self.topbar)
-        self.reconnect_banner = QLabel("Reconnecting… your changes are saved locally")
-        self.reconnect_banner.setObjectName("banner")
-        self.reconnect_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.topbar.pack(fill="x")
+        tk.Frame(self, height=1, background=t.border).pack(fill="x")
+        self.reconnect_banner = Label(self, "Reconnecting… your changes are saved locally",
+                                      "banner", anchor="center", padding=(12, 6))
+        self.reconnect_banner.pack(fill="x")
         self.reconnect_banner.setVisible(False)
-        root.addWidget(self.reconnect_banner)
-        self.middle = QSplitter(Qt.Orientation.Vertical)
-        self.split = QSplitter(Qt.Orientation.Horizontal)
-        self.rail = self._build_rail()
-        self.layers = LayersPanel(self.canvas)
-        self.layers.setObjectName("leftpanel")
-        self.layers.setMinimumWidth(200)
-        self.right = self._build_right()
-        self.right.setMinimumWidth(200)
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
-        body.addWidget(self.rail)
-        self.split.addWidget(self.layers)
-        self.split.addWidget(self.canvas)
-        self.split.addWidget(self.right)
-        self.split.setSizes([240, 900, 280])
-        self.split.setStretchFactor(1, 1)
-        self.split.setCollapsible(1, False)
-        body.addWidget(self.split, 1)
-        holder = QWidget()
-        holder.setLayout(body)
-        self.middle.addWidget(holder)
-        self.inspector = InspectorPanel(self.get_core, self.discovery)
-        self.inspector.setVisible(False)
-        self.middle.addWidget(self.inspector)
-        self.middle.setStretchFactor(0, 1)
-        root.addWidget(self.middle, 1)
         self.statusbar = self._build_statusbar()
-        root.addWidget(self.statusbar)
+        self.statusbar.pack(side="bottom", fill="x")
+        tk.Frame(self, height=1, background=t.border).pack(side="bottom", fill="x")
+        self.middle = ttk.PanedWindow(self, orient="vertical")
+        self.middle.pack(fill="both", expand=True)
+        holder = Frame(self.middle, "page")
+        self.middle.add(holder, weight=1)
+        self.rail = self._build_rail(holder)
+        self.rail.pack(side="left", fill="y")
+        self.rail_border = tk.Frame(holder, width=1, background=t.border)
+        self.rail_border.pack(side="left", fill="y")
+        self.split = ttk.PanedWindow(holder, orient="horizontal")
+        self.split.pack(side="left", fill="both", expand=True)
+        self.canvas = CanvasView(self.session, self.split)
+        self.layers = LayersPanel(self.split, self.canvas)
+        self.right = self._build_right(self.split)
+        self.split.add(self.layers, weight=0)
+        self.split.add(self.canvas, weight=1)
+        self.split.add(self.right, weight=0)
+        self._pane_widths = [240, 280]  # layers, right panel; the canvas takes the rest
+        self.split.bind("<Configure>", self._split_resized, add="+")
+        self.split.bind("<ButtonRelease-1>", self._sash_moved, add="+")
+        self.inspector = InspectorPanel(self.middle, self.get_core, self.discovery)
+        self._inspector_shown = False
+        self._ui_shown = True
 
-    def _build_topbar(self) -> QWidget:
-        bar = QWidget()
-        bar.setObjectName("topbar")
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(8, 4, 8, 4)
-        self.menu_button = QPushButton("Room")
-        self.menu_button.setObjectName("title")
-        self.menu_button.setIcon(icons.icon("menu", theme.current().text_primary))
+    def _split_resized(self, event: Any = None) -> None:
+        """Side panels keep their width as the window resizes (Qt's stretch factors)."""
+        if not self._ui_shown:
+            return
+        width = self.split.winfo_width()
+        left, right = self._pane_widths
+        try:
+            self.split.sashpos(0, left)
+            self.split.sashpos(1, max(left + 200, width - right))
+        except tk.TclError:
+            pass
+
+    def _sash_moved(self, _event: Any = None) -> None:
+        if self._ui_shown:
+            try:
+                width = self.split.winfo_width()
+                self._pane_widths = [self.split.sashpos(0), width - self.split.sashpos(1)]
+            except tk.TclError:
+                pass
+
+    def _build_topbar(self) -> Frame:
+        t = theme.current()
+        bar = Frame(self, "bar", padding=(8, 4))
+        menu_icon = icons.photo("menu", t.text_primary, master=bar)
+        self.menu_button = Button(bar, "Room", "room", image=menu_icon)
         self.menu_button.clicked.connect(self._open_room_menu)
-        row.addWidget(self.menu_button)
-        self.share_button = QPushButton("Share")
-        self.share_button.setIcon(icons.icon("share", theme.current().text_primary))
+        self.menu_button.pack(side="left")
+        share_icon = icons.photo("share", t.text_primary, master=bar)
+        self.share_button = Button(bar, "Share", image=share_icon)
         self.share_button.clicked.connect(self.open_access)
-        row.addWidget(self.share_button)
-        undo = QToolButton()
-        undo.setIcon(icons.icon("undo", theme.current().text_primary))
-        undo.setToolTip("Undo (Ctrl+Z). Only ever undoes your own changes.")
+        self.share_button.pack(side="left", padx=4)
+        undo = ToolButton(bar, "undo", tooltip="Undo (Ctrl+Z). Only ever undoes your own changes.")
         undo.clicked.connect(self.session.undo)
-        row.addWidget(undo)
-        redo = QToolButton()
-        redo.setIcon(icons.icon("redo", theme.current().text_primary))
-        redo.setToolTip("Redo (Ctrl+Shift+Z)")
+        undo.pack(side="left")
+        redo = ToolButton(bar, "redo", tooltip="Redo (Ctrl+Shift+Z)")
         redo.clicked.connect(self.session.redo)
-        row.addWidget(redo)
-        row.addStretch(1)
-        self.avatars = QHBoxLayout()
-        self.avatars.setSpacing(-4)
-        row.addLayout(self.avatars)
-        self.zoom_button = QPushButton("100%")
+        redo.pack(side="left")
+        inspector = ToolButton(bar, "activity", tooltip="Packet Inspector (Ctrl+Shift+I)")
+        inspector.clicked.connect(self.toggle_inspector)
+        inspector.pack(side="right")
+        self.zoom_button = Button(bar, "100%")
         self.zoom_button.setToolTip("Ctrl+scroll to zoom. Ctrl+0 for 100%, Shift+1 to fit.")
         self.zoom_button.clicked.connect(lambda: self.canvas.zoom_to(1.0))
-        row.addWidget(self.zoom_button)
-        inspector = QToolButton()
-        inspector.setIcon(icons.icon("activity", theme.current().text_primary))
-        inspector.setToolTip("Packet Inspector (Ctrl+Shift+I)")
-        inspector.clicked.connect(self.toggle_inspector)
-        row.addWidget(inspector)
+        self.zoom_button.pack(side="right", padx=4)
+        self.avatars = Frame(bar, "bar")
+        self.avatars.pack(side="right", padx=4)
         return bar
 
-    def _build_rail(self) -> QWidget:
-        rail = QWidget()
-        rail.setObjectName("toolrail")
-        rail.setFixedWidth(40)
-        column = QVBoxLayout(rail)
-        column.setContentsMargins(4, 8, 4, 8)
-        column.setSpacing(2)
-        self.tool_group = QButtonGroup(self)
-        self.tool_group.setExclusive(True)
-        color = theme.current().text_primary
+    def _build_rail(self, master: tk.Misc) -> Frame:
+        rail = Frame(master, "bar", padding=(4, 8), width=40)
         for name, icon_name, tip, _ in TOOLS:
-            button = QToolButton()
-            button.setIcon(icons.icon(icon_name, color))
-            button.setToolTip(tip)
-            button.setCheckable(True)
-            button.clicked.connect(lambda _=False, n=name: self.canvas.set_tool(n))
-            self.tool_group.addButton(button)
+            button = ToolButton(rail, icon_name, checkable=True, tooltip=tip)
+            button.clicked.connect(lambda n=name: self._tool_clicked(n))
+            button.pack(pady=1)
             self.tool_buttons[name] = button
-            column.addWidget(button)
         self.tool_buttons["select"].setChecked(True)
-        self.image_button = QToolButton()
-        self.image_button.setIcon(icons.icon("image", color))
-        self.image_button.setToolTip("Insert image…")
+        self.image_button = ToolButton(rail, "image", tooltip="Insert image…")
         self.image_button.clicked.connect(self.insert_image)
-        column.addWidget(self.image_button)
-        hand = QToolButton()
-        hand.setIcon(icons.icon("hand", color))
-        hand.setCheckable(True)
-        hand.setToolTip("Hand (hold Space)")
-        hand.clicked.connect(lambda: self.canvas.set_tool("hand"))
-        self.tool_group.addButton(hand)
+        self.image_button.pack(pady=1)
+        hand = ToolButton(rail, "hand", checkable=True, tooltip="Hand (hold Space)")
+        hand.clicked.connect(lambda: self._tool_clicked("hand"))
+        hand.pack(pady=1)
         self.tool_buttons["hand"] = hand
-        column.addWidget(hand)
-        column.addSpacing(8)
-        self.stroke_swatch = ColorButton(self.canvas.stroke_color, allow_none=False)
+        tk.Frame(rail, height=8, background=theme.current().bg_panel).pack()
+        self.stroke_swatch = ColorButton(rail, self.canvas_stroke_default(), allow_none=False)
         self.stroke_swatch.setToolTip("Stroke and pen color")
         self.stroke_swatch.color_chosen.connect(self._stroke_color)
-        column.addWidget(self.stroke_swatch)
-        self.fill_swatch = ColorButton(self.canvas.fill_color)
+        self.stroke_swatch.pack(pady=1)
+        self.fill_swatch = ColorButton(rail, "#D9D9D9")
         self.fill_swatch.setToolTip("Fill color for new shapes")
         self.fill_swatch.color_chosen.connect(lambda c: setattr(self.canvas, "fill_color", c))
-        column.addWidget(self.fill_swatch)
-        column.addStretch(1)
+        self.fill_swatch.pack(pady=1)
         return rail
+
+    @staticmethod
+    def canvas_stroke_default() -> str:
+        return "#1E1E1E"
+
+    def _tool_clicked(self, name: str) -> None:
+        self.canvas.set_tool(name)
+        self._tool_changed(self.canvas.tool.name)  # a refused tool must not stay checked
 
     def _stroke_color(self, color: str | None) -> None:
         if color:
             self.canvas.stroke_color = color
 
-    def _build_right(self) -> QWidget:
-        self.tabs = QTabWidget()
-        self.tabs.setObjectName("rightpanel")
-        self.design = DesignPanel(self.canvas, self.export_selection)
-        self.comments = CommentsPanel(self.canvas)
-        self.chat = ChatPanel(self.session)
+    def _build_right(self, master: tk.Misc) -> ttk.Notebook:
+        self.tabs = ttk.Notebook(master)
+        self.design = DesignPanel(self.tabs, self.canvas, self.export_selection)
+        self.comments = CommentsPanel(self.tabs, self.canvas)
+        self.chat = ChatPanel(self.tabs, self.session)
         self.chat.unread_changed.connect(self._update_chat_badge)
         self.chat.new_private.connect(self.new_private_message)
-        self.tabs.addTab(self.design, "Design")
-        self.tabs.addTab(self.comments, "Comments")
-        self.tabs.addTab(self.chat, "Chat")
-        self.tabs.currentChanged.connect(self._tab_changed)
+        self.tabs.add(self.design, text="Design")
+        self.tabs.add(self.comments, text="Comments")
+        self.tabs.add(self.chat, text="Chat")
+        self.tabs.bind("<<NotebookTabChanged>>", lambda e: self._tab_changed())
         return self.tabs
 
-    def _build_statusbar(self) -> QWidget:
-        bar = QWidget()
-        bar.setObjectName("statusbar")
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(8, 2, 8, 2)
-        row.setSpacing(12)
-        self.role_chip = QLabel()
-        row.addWidget(self.role_chip)
-        self.dot = QLabel("●")
-        row.addWidget(self.dot)
-        self.conn_label = QLabel()
-        row.addWidget(self.conn_label)
-        self.seq_label = QLabel()
-        self.seq_label.setObjectName("muted")
-        row.addWidget(self.seq_label)
-        self.objects_label = QLabel()
-        self.objects_label.setObjectName("muted")
-        row.addWidget(self.objects_label)
-        self.hash_label = QLabel()
-        self.hash_label.setObjectName("muted")
-        self.hash_label.setVisible(False)
-        self.hash_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        row.addWidget(self.hash_label)
-        row.addStretch(1)
-        self.save_chip = QPushButton()
-        self.save_chip.setFlat(True)
+    def _build_statusbar(self) -> Frame:
+        t = theme.current()
+        bar = Frame(self, "bar", padding=(8, 2))
+        self.role_chip = tk.Label(bar, text="", foreground="#FFFFFF", padx=6, pady=1,
+                                  font=theme.font(11, 600))
+        self.role_chip.pack(side="left", padx=(0, 12))
+        self.dot = Label(bar, "●", "panel")
+        self.dot.pack(side="left")
+        self.conn_label = Label(bar, "", "panel")
+        self.conn_label.pack(side="left", padx=(4, 12))
+        self.seq_label = Label(bar, "", "panelmuted")
+        self.seq_label.pack(side="left", padx=(0, 12))
+        self.objects_label = Label(bar, "", "panelmuted")
+        self.objects_label.pack(side="left", padx=(0, 12))
+        self.hash_label = tk.Entry(bar, relief="flat", borderwidth=0, width=26,
+                                   readonlybackground=t.bg_panel, foreground=t.text_muted,
+                                   font=theme.font(12), highlightthickness=0, state="readonly")
+        self._hash_shown = False
+        self.save_chip = Button(bar, "", "flat")
         self.save_chip.clicked.connect(self._save_chip_clicked)
-        row.addWidget(self.save_chip)
+        self.save_chip.pack(side="right")
         return bar
 
     def _bind_shortcuts(self) -> None:
+        top = self.winfo_toplevel()
+
         def bind(keys: str, action: Callable[[], None]) -> None:
-            shortcut = QShortcut(QKeySequence(keys), self)
-            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-            shortcut.activated.connect(lambda: self._when_not_typing(keys, action))
+            for sequence in key_sequences(keys):
+                top.bind(sequence, lambda e, k=keys, a=action: self._when_not_typing(k, a))
+                self._bound.append(sequence)
 
         for name, _, _, key in TOOLS:
-            bind(key, lambda n=name: self.canvas.set_tool(n))
+            bind(key, lambda n=name: self._tool_clicked(n))
         bind("Ctrl+Z", self.session.undo)
         bind("Ctrl+Shift+Z", self.session.redo)
         bind("Ctrl+S", self.save)
@@ -391,19 +397,17 @@ class BoardPage(QWidget):
         for key, mode in ALIGN_KEYS:
             bind(key, lambda m=mode: self.canvas.align(m))
 
-    def _when_not_typing(self, keys: str, action: Callable[[], None]) -> None:
-        """Single-letter shortcuts must not fire while the person is typing into a field."""
-        focus = QGuiApplication.focusObject()
-        typing = focus is not None and focus.metaObject().className() in (
-            "QLineEdit",
-            "QPlainTextEdit",
-            "QTextEdit",
-            "QDoubleSpinBox",
-            "QSpinBox",
-        )
-        if typing and "Ctrl" not in keys and "Alt" not in keys:
-            return
+    def _when_not_typing(self, keys: str, action: Callable[[], None]) -> str | None:
+        """Single-letter shortcuts must not fire while the person is typing into a field; nor
+        do the editing keys a text field handles itself (undo, redo)."""
+        if not self.winfo_ismapped():
+            return None
+        focus = self.focus_get()
+        typing = focus is not None and focus.winfo_class() in TYPING_CLASSES
+        if typing and (("Ctrl" not in keys and "Alt" not in keys) or keys.endswith("Z")):
+            return None
         action()
+        return "break"
 
     # ------------------------------------------------------------------ session events
     def on_event(self, name: str, **kw: Any) -> None:
@@ -423,7 +427,7 @@ class BoardPage(QWidget):
         for request in self.session.pending_requests.values():
             self._toast_request(request)
         if first and self.session.doc.view.live():
-            QTimer.singleShot(0, self.canvas.zoom_fit)
+            self.after_idle(self.canvas.zoom_fit)
 
     def _ev_board(self, changed: set[str]) -> None:
         self.canvas.sync(changed)
@@ -476,7 +480,7 @@ class BoardPage(QWidget):
         self.chat.refresh()
         if message is None or message["from_fp"] == self.session.fp:
             return
-        chat_open = self.tabs.currentWidget() is self.chat and self.isVisible()
+        chat_open = self.tabs.select() == str(self.chat) and self.isVisible()
         if message.get("to_fp") and (not chat_open or channel_id != self.session.chat.active):
             sender = message.get("from_name", "")
             preview = message["text"][:40]
@@ -536,12 +540,12 @@ class BoardPage(QWidget):
 
     # ------------------------------------------------------------------ toast relay
     def toast(self, text: str, action: str | None = None, on_action: Any = None) -> None:
-        window = self.window()
+        window = self.winfo_toplevel()
         if hasattr(window, "show_toast"):
             window.show_toast(text, action, on_action)
 
     def _toast_request(self, request: dict[str, Any]) -> None:
-        window = self.window()
+        window = self.winfo_toplevel()
         if hasattr(window, "show_toast"):
             # Stays until decided: a request must not silently vanish after a few seconds.
             self._request_toasts[request["fingerprint"]] = window.show_toast(
@@ -557,7 +561,7 @@ class BoardPage(QWidget):
         if toast is not None:
             try:
                 toast.close_toast()
-            except RuntimeError:
+            except tk.TclError:
                 pass  # the stack cap already removed this toast
 
     def review_request(self, request: dict[str, Any]) -> None:
@@ -583,8 +587,7 @@ class BoardPage(QWidget):
                 button.setToolTip("Viewers can't edit. Ask the owner.")
         self.image_button.setEnabled(can_edit)
         self.share_button.setVisible(role == "owner")
-        name = self.session.room.get("name", "Room")
-        self.menu_button.setText(name)
+        self.menu_button.setText(self.session.room.get("name", "Room"))
         if not can_edit and self.canvas.tool.edits:
             self.canvas.set_tool("select")
         self.layers.schedule_refresh()
@@ -596,11 +599,7 @@ class BoardPage(QWidget):
         session = self.session
         role = session.role or ""
         color = theme.ROLE_COLORS.get(role, t.text_muted)
-        self.role_chip.setText(ROLE_LABEL.get(role, ""))
-        self.role_chip.setStyleSheet(
-            f"color:#FFFFFF;background:{color};border-radius:4px;padding:1px 6px;"
-            "font-size:11px;font-weight:600;"
-        )
+        self.role_chip.configure(text=ROLE_LABEL.get(role, ""), background=color)
         states = {
             "live": (t.success, "Connected"),
             "pending": (t.warn, "Waiting"),
@@ -611,14 +610,17 @@ class BoardPage(QWidget):
         dot_color, text = states.get(self.conn_state, (t.danger, "Offline"))
         if self.rtt is not None and self.conn_state == "live":
             text += f" · {self.rtt * 1000:.0f} ms"
-        self.dot.setStyleSheet(f"color:{dot_color};")
+        self.dot.configure(foreground=dot_color)
         self.dot.setToolTip(text)
         self.conn_label.setText(text)
         self.seq_label.setText(f"seq {session.doc.seq}")
         count = sum(1 for o in session.doc.view.live() if o["type"] != "comment")
         self.objects_label.setText(f"{count} objects")
-        if self.hash_label.isVisible():
-            self.hash_label.setText(session.doc.hash()[:23])
+        if self._hash_shown:
+            self.hash_label.configure(state="normal")
+            self.hash_label.delete(0, "end")
+            self.hash_label.insert(0, session.doc.hash()[:23])
+            self.hash_label.configure(state="readonly")
         self._refresh_save_chip()
 
     def _refresh_save_chip(self) -> None:
@@ -640,7 +642,9 @@ class BoardPage(QWidget):
             text, color = "", t.text_muted
         self.save_chip.setText(text)
         self.save_chip.setVisible(state != SAVE_IDLE)
-        self.save_chip.setStyleSheet(f"color:{color};border:none;background:transparent;")
+        style = f"save{color[1:]}.flat.TButton"
+        ttk.Style(self).configure(style, foreground=color)
+        self.save_chip.configure(style=style)
         tips = []
         if "seq" in info:
             tips.append(f"Checkpoint at seq {info['seq']}")
@@ -655,34 +659,34 @@ class BoardPage(QWidget):
             self.save()
 
     def _refresh_people(self) -> None:
-        while self.avatars.count():
-            widget = self.avatars.takeAt(0).widget()
-            if widget is not None:
-                widget.deleteLater()
+        for child in self.avatars.winfo_children():
+            child.destroy()
         online = [m for m in self.session.members.values() if m.get("online")]
         online.sort(key=lambda m: m["fp"] != self.session.fp)
         for member in online[:6]:
-            avatar = Avatar(member.get("name", "?"), member["fp"], member.get("away", False))
+            avatar = Avatar(self.avatars, member.get("name", "?"), member["fp"],
+                            member.get("away", False))
             avatar.clicked.connect(self.open_people)
-            self.avatars.addWidget(avatar)
+            avatar.pack(side="left")
         if not online:
-            people = QToolButton()
-            people.setIcon(icons.icon("users", theme.current().text_primary))
+            people = ToolButton(self.avatars, "users")
             people.clicked.connect(self.open_people)
-            self.avatars.addWidget(people)
+            people.pack(side="left")
         extra = len(online) - 6
         if extra > 0:
-            more = QToolButton()
-            more.setText(f"+{extra}")
+            more = ToolButton(self.avatars, text=f"+{extra}")
             more.clicked.connect(self.open_people)
-            self.avatars.addWidget(more)
+            more.pack(side="left")
 
     def open_people(self) -> None:
-        popover = PeoplePopover(self.session, self.open_private)
-        popover.adjustSize()
-        anchor = self.topbar.mapToGlobal(self.topbar.rect().bottomRight())
-        popover.move(anchor.x() - popover.width() - 8, anchor.y() + 4)
-        popover.show()
+        if self._popover is not None and self._popover.winfo_exists():
+            self._popover.close()
+        popover = PeoplePopover(self, self.session, self.open_private)
+        popover.update_idletasks()
+        x = self.topbar.winfo_rootx() + self.topbar.winfo_width() - popover.winfo_reqwidth() - 8
+        y = self.topbar.winfo_rooty() + self.topbar.winfo_height() + 4
+        popover.geometry(f"+{max(0, x)}+{y}")
+        popover.focus_force()
         self._popover = popover  # kept alive for as long as it is on screen
 
     def _update_share_badge(self) -> None:
@@ -690,39 +694,60 @@ class BoardPage(QWidget):
         self.share_button.setText(f"Share  •{count}" if count else "Share")
 
     def _update_chat_badge(self, count: int) -> None:
-        index = self.tabs.indexOf(self.chat)
-        self.tabs.setTabText(index, f"Chat  •{count}" if count else "Chat")
+        self.tabs.tab(self.chat, text=f"Chat  •{count}" if count else "Chat")
 
-    def _tab_changed(self, index: int) -> None:
-        if self.tabs.widget(index) is self.chat:
+    def chat_tab_text(self) -> str:
+        return str(self.tabs.tab(self.chat, "text"))
+
+    def _tab_changed(self) -> None:
+        if self.tabs.select() == str(self.chat):
             self.chat.open_channel(self.session.chat.active)
 
     def _tool_changed(self, name: str) -> None:
-        button = self.tool_buttons.get(name)
-        if button is not None:
-            button.setChecked(True)
+        for tool, button in self.tool_buttons.items():
+            button.setChecked(tool == name)
 
     def _second(self) -> None:
         self.session.tick()
         self._status_refresh()
+        self._clock = after_ms(self, 1000, self._second)
 
     # ------------------------------------------------------------------ panel commands
     def toggle_ui(self) -> None:
-        visible = not self.layers.isVisible()
-        for widget in (self.layers, self.right, self.rail):
-            widget.setVisible(visible)
+        self._ui_shown = not self._ui_shown
+        if self._ui_shown:
+            self.split.insert(0, self.layers, weight=0)
+            self.split.add(self.right, weight=0)
+            self.rail.pack(side="left", fill="y", before=self.split)
+            self.rail_border.pack(side="left", fill="y", before=self.split)
+            self.after_idle(self._split_resized)
+        else:
+            self.split.forget(self.layers)
+            self.split.forget(self.right)
+            self.rail.pack_forget()
+            self.rail_border.pack_forget()
 
     def toggle_inspector(self) -> None:
-        self.inspector.setVisible(not self.inspector.isVisible())
-        if self.inspector.isVisible():
-            self.middle.setSizes([self.height() - 300, 300])
+        self._inspector_shown = not self._inspector_shown
+        if self._inspector_shown:
+            self.middle.add(self.inspector, weight=0)
+            self.update_idletasks()
+            self.middle.sashpos(0, max(100, self.middle.winfo_height() - 300))
+            self.inspector.start()
+        else:
+            self.middle.forget(self.inspector)
+            self.inspector.stop()
 
     def toggle_hash(self) -> None:
-        self.hash_label.setVisible(not self.hash_label.isVisible())
+        self._hash_shown = not self._hash_shown
+        if self._hash_shown:
+            self.hash_label.pack(side="left", after=self.objects_label)
+        else:
+            self.hash_label.pack_forget()
         self._status_refresh()
 
     def focus_chat(self) -> None:
-        self.tabs.setCurrentWidget(self.chat)
+        self.tabs.select(self.chat)
         self.chat.focus_input()
 
     def new_private_message(self) -> None:
@@ -731,7 +756,7 @@ class BoardPage(QWidget):
             self.open_private(picker.chosen)
 
     def open_private(self, fingerprint: str) -> None:
-        self.tabs.setCurrentWidget(self.chat)
+        self.tabs.select(self.chat)
         self.chat.open_private(fingerprint)
 
     def open_access(self) -> None:
@@ -741,41 +766,31 @@ class BoardPage(QWidget):
         self._update_share_badge()
 
     def _open_comment(self, obj_id: str) -> None:
-        self.tabs.setCurrentWidget(self.comments)
+        self.tabs.select(self.comments)
         self.comments.open_comment(obj_id)
 
     def _open_room_menu(self) -> None:
-        menu = QMenu(self)
-        menu.addAction("Save\tCtrl+S", self.save)
-        menu.addAction("Save a copy…\tCtrl+Shift+S", self.save_copy)
-        menu.addAction("Open .lanvas…\tCtrl+O", self.open_file_requested.emit)
-        menu.addAction("Export…\tCtrl+Shift+E", self.export)
-        history = menu.addAction("Version history", self.version_history)
-        if self.session.role != "owner":
-            history.setEnabled(False)
-            history.setToolTip("Only the owner can browse versions.")
-        clear = menu.addAction("Clear canvas…", self.clear_canvas)
-        clear.setEnabled(
-            self.session.role == "owner"
-            or (self.session.role == "editor" and self.session.settings.get("editors_can_clear"))
-        )
-        switch = menu.addMenu("Switch board")
         others = [b for b in self.boards if b.room_id != self.session.room_id and b.compatible]
-        if not others:
-            switch.setEnabled(False)
-        for board in others:
-            switch.addAction(board.name, lambda b=board: self.switch_requested.emit(b, ""))
-        menu.addSeparator()
-        menu.addAction("Leave room", self.leave_requested.emit)
-        menu.exec(self.menu_button.mapToGlobal(self.menu_button.rect().bottomLeft()))
+        owner = self.session.role == "owner"
+        can_clear = owner or (
+            self.session.role == "editor" and self.session.settings.get("editors_can_clear")
+        )
+        popup_menu(self.menu_button, [
+            ("Save\tCtrl+S", self.save),
+            ("Save a copy…\tCtrl+Shift+S", self.save_copy),
+            ("Open .lanvas…\tCtrl+O", self.open_file_requested.emit),
+            ("Export…\tCtrl+Shift+E", self.export),
+            ("Version history", self.version_history, owner),
+            ("Clear canvas…", self.clear_canvas, bool(can_clear)),
+            ("Switch board", [(b.name, lambda b=b: self.switch_requested.emit(b, ""))
+                              for b in others]),
+            None,
+            ("Leave room", self.leave_requested.emit),
+        ])
 
     def clear_canvas(self) -> None:
-        answer = QMessageBox.question(
-            self,
-            "Clear canvas",
-            "Remove everything from the board for everyone? You can undo this.",
-        )
-        if answer == QMessageBox.StandardButton.Yes:
+        if ask_yes_no(self, "Clear canvas",
+                      "Remove everything from the board for everyone? You can undo this."):
             self.session.clear()
 
     def version_history(self) -> None:
@@ -790,32 +805,37 @@ class BoardPage(QWidget):
         """Images travel inside ops, so they get downscaled to fit the per-object size limit."""
         if not self.canvas.can_edit():
             return
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Insert image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
+        path = filedialog.askopenfilename(
+            parent=self, title="Insert image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp")],
         )
-        if not path:
-            return
-        image = QImage(path)
-        if image.isNull():
+        if path:
+            self.insert_image_file(Path(path))
+
+    def insert_image_file(self, path: Path) -> None:
+        try:
+            with Image.open(path) as opened:
+                image = opened.copy()
+        except (OSError, ValueError):
             self.toast("That file could not be read as an image.")
             return
         data = encode_image(image)
         if data is None:
             self.toast("That image is too large to add to the board.")
             return
-        center = self.canvas.mapToScene(self.canvas.viewport().rect().center())
-        side = max(image.width(), image.height(), 1)
+        center = self.canvas.view_center_scene()
+        side = max(image.width, image.height, 1)
         scale = min(1.0, 600 / side)
-        width, height = image.width() * scale, image.height() * scale
+        width, height = image.width * scale, image.height * scale
         op = self.session.create(
             "image",
             {
-                "x": center.x() - width / 2,
-                "y": center.y() - height / 2,
+                "x": center.x - width / 2,
+                "y": center.y - height / 2,
                 "w": width,
                 "h": height,
                 "image_data": data,
-                "name": Path(path).name[:200],
+                "name": path.name[:200],
             },
         )
         if op:
@@ -838,8 +858,9 @@ class BoardPage(QWidget):
         options = dialogs.SaveCopyDialog(self)
         if not options.exec():
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save a copy", self._default_name(".lanvas"), "LANvas board (*.lanvas)"
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Save a copy", initialfile=self._default_name(".lanvas"),
+            defaultextension=".lanvas", filetypes=[("LANvas board", "*.lanvas")],
         )
         if path:
             self._write_lanvas(path, options.include_chat.isChecked(), options.password())
@@ -851,9 +872,10 @@ class BoardPage(QWidget):
         def job() -> None:
             try:
                 durable.atomic_write(target, export_lanvas(document, password))
-                self.exporter.finished.emit(str(target), "")
+                call_in_ui(lambda: self.exporter.finished.emit(str(target), ""))
             except OSError as exc:
-                self.exporter.finished.emit(str(target), str(exc))
+                error = str(exc)
+                call_in_ui(lambda: self.exporter.finished.emit(str(target), error))
 
         self.io.submit(job)
 
@@ -895,40 +917,41 @@ class BoardPage(QWidget):
     def _run_export(self, dialog: dialogs.ExportDialog) -> None:
         fmt = dialog.format_name()
         filters = {
-            "PNG": ("PNG image (*.png)", ".png"),
-            "JPEG": ("JPEG image (*.jpg)", ".jpg"),
-            "SVG": ("SVG image (*.svg)", ".svg"),
-            "PDF": ("PDF document (*.pdf)", ".pdf"),
-            ".lanvas": ("LANvas board (*.lanvas)", ".lanvas"),
+            "PNG": ("PNG image", ".png"),
+            "JPEG": ("JPEG image", ".jpg"),
+            "SVG": ("SVG image", ".svg"),
+            "PDF": ("PDF document", ".pdf"),
+            ".lanvas": ("LANvas board", ".lanvas"),
         }
-        file_filter, suffix = filters[fmt]
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export", self._default_name(suffix), file_filter
+        label, suffix = filters[fmt]
+        # Read every option now: the dialog window is gone once the file chooser returns.
+        include_chat = dialog.include_chat.isChecked()
+        password = dialog.fields.password() if dialog.protect.isChecked() else None
+        scope = self._scope_from(dialog)
+        scale = dialog.scale.currentData()
+        transparent = dialog.transparent.isChecked()
+        page = dialog.page.currentData()
+        each_frame = dialog.each_frame.isChecked()
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Export", initialfile=self._default_name(suffix),
+            defaultextension=suffix, filetypes=[(label, f"*{suffix}")],
         )
         if not path:
             return
         if fmt == ".lanvas":
-            password = dialog.fields.password() if dialog.protect.isChecked() else None
-            self._write_lanvas(path, dialog.include_chat.isChecked(), password)
+            self._write_lanvas(path, include_chat, password)
             return
         scene = self.canvas.board_scene
-        scope = self._scope_from(dialog)
         title = self.session.room.get("name", "LANvas")
         if fmt in ("PNG", "JPEG"):
             steps = export_raster(
-                scene,
-                scope,
-                fmt,
-                dialog.scale.currentData(),
-                dialog.transparent.isChecked(),
-                "#FFFFFF" if dialog.transparent.isChecked() else theme.current().bg_canvas,
+                scene, scope, fmt, scale, transparent,
+                "#FFFFFF" if transparent else theme.current().bg_canvas,
             )
         elif fmt == "SVG":
             steps = export_svg(scene, scope, title)
         else:
-            steps = export_pdf(
-                scene, scope, dialog.page.currentData(), dialog.each_frame.isChecked(), title
-            )
+            steps = export_pdf(scene, scope, page, each_frame, title)
         self.exporter.start(steps, Path(path), len(scene.items_by_id))
 
     def _export_finished(self, path: str, error: str) -> None:
@@ -939,8 +962,11 @@ class BoardPage(QWidget):
             self.toast(f"Exported {name}", "Show in folder", lambda: _show_in_folder(path))
 
     def shutdown(self) -> None:
-        self.clock.stop()
-        self.inspector.timer.stop()
+        top = self.winfo_toplevel()
+        for sequence in self._bound:
+            top.unbind(sequence)
+        self._bound = []
+        self.inspector.stop()
         self.io.flush()
         self.io.stop()
 
@@ -951,29 +977,32 @@ class BoardPage(QWidget):
         return short_fingerprint(self.session.fp)
 
 
-def encode_image(image: QImage) -> str | None:
+def encode_image(image: Image.Image) -> str | None:
     """PNG keeps transparency; JPEG is the fallback for photos that would otherwise be too big."""
-    import base64
-
-    if max(image.width(), image.height()) > MAX_IMAGE_SIDE:
-        image = image.scaled(
-            MAX_IMAGE_SIDE,
-            MAX_IMAGE_SIDE,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-    for fmt, quality in (("PNG", -1), ("JPEG", 85), ("JPEG", 60)):
-        buffer = QBuffer()
-        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-        image.save(buffer, fmt, quality)
-        encoded = base64.b64encode(bytes(buffer.data())).decode()
+    if max(image.width, image.height) > MAX_IMAGE_SIDE:
+        image = image.copy()
+        image.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE), Image.LANCZOS)
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGBA")
+    for fmt, quality in (("PNG", None), ("JPEG", 85), ("JPEG", 60)):
+        buffer = io.BytesIO()
+        if fmt == "JPEG":
+            image.convert("RGB").save(buffer, "JPEG", quality=quality)
+        else:
+            image.save(buffer, "PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode()
         if len(encoded) <= MAX_IMAGE_B64:
             return encoded
     return None
 
 
 def _show_in_folder(path: str) -> None:
-    from PyQt6.QtCore import QUrl
-    from PyQt6.QtGui import QDesktopServices
-
-    QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
+    folder = str(Path(path).parent)
+    if sys.platform == "win32":
+        os.startfile(folder)  # type: ignore[attr-defined]  # noqa: S606
+    else:
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
+        try:
+            subprocess.Popen([opener, folder])  # noqa: S603
+        except OSError:
+            log.warning("could not open %s", folder)

@@ -7,10 +7,8 @@ import time
 import uuid
 from typing import Any
 
-from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QPainterPath, QTransform
-
-from client.canvas.items import BoardItem, object_rect
+from client.canvas.items import object_rect, object_transform
+from client.geom import Point, Rect
 from client.theme import STICKY_COLOR
 from common.simplify import simplify
 
@@ -27,32 +25,27 @@ HANDLES = ("nw", "n", "ne", "e", "se", "s", "sw", "w")
 SIZED_TYPES = ("rect", "ellipse", "frame", "text", "sticky", "image", "path", "group")
 
 
-def object_transform(obj: dict[str, Any]) -> QTransform:
-    """Local object space to scene space. Rotation is about the rectangle's center."""
-    props = obj["props"]
-    rect = object_rect(obj)
-    center = rect.center()
-    transform = QTransform()
-    transform.translate(props.get("x", 0), props.get("y", 0))
-    if obj["type"] != "comment":
-        transform.translate(center.x(), center.y())
-        transform.rotate(props.get("rotation", 0))
-        transform.translate(-center.x(), -center.y())
-    return transform
-
-
-def handle_points(rect: QRectF) -> dict[str, QPointF]:
-    cx, cy = rect.center().x(), rect.center().y()
+def handle_points(rect: Rect) -> dict[str, Point]:
+    rect = rect.normalized()
+    cx, cy = rect.center().x, rect.center().y
     return {
-        "nw": rect.topLeft(),
-        "n": QPointF(cx, rect.top()),
-        "ne": rect.topRight(),
-        "e": QPointF(rect.right(), cy),
-        "se": rect.bottomRight(),
-        "s": QPointF(cx, rect.bottom()),
-        "sw": rect.bottomLeft(),
-        "w": QPointF(rect.left(), cy),
+        "nw": Point(rect.left, rect.top),
+        "n": Point(cx, rect.top),
+        "ne": Point(rect.right, rect.top),
+        "e": Point(rect.right, cy),
+        "se": Point(rect.right, rect.bottom),
+        "s": Point(cx, rect.bottom),
+        "sw": Point(rect.left, rect.bottom),
+        "w": Point(rect.left, cy),
     }
+
+
+class Mods:
+    """The keyboard modifiers of a mouse event, as the tools need them."""
+
+    def __init__(self, shift: bool = False, ctrl: bool = False) -> None:
+        self.shift = shift
+        self.ctrl = ctrl
 
 
 class Tool:
@@ -60,15 +53,15 @@ class Tool:
 
     name = ""
     edits = True
-    cursor = Qt.CursorShape.CrossCursor
+    cursor = "crosshair"
 
     def __init__(self, canvas: Any) -> None:
         self.c = canvas
 
-    def press(self, pos: QPointF, event: Any) -> None: ...
-    def move(self, pos: QPointF, event: Any) -> None: ...
-    def release(self, pos: QPointF, event: Any) -> None: ...
-    def double_click(self, pos: QPointF, event: Any) -> None: ...
+    def press(self, pos: Point, event: Any) -> None: ...
+    def move(self, pos: Point, event: Any) -> None: ...
+    def release(self, pos: Point, event: Any) -> None: ...
+    def double_click(self, pos: Point, event: Any) -> None: ...
     def overlay(self, painter: Any) -> None: ...
     def cancel(self) -> None: ...
 
@@ -76,24 +69,24 @@ class Tool:
 class SelectTool(Tool):
     name = "select"
     edits = False
-    cursor = Qt.CursorShape.ArrowCursor
+    cursor = "arrow"
 
     def __init__(self, canvas: Any) -> None:
         super().__init__(canvas)
         self.mode: str | None = None
-        self.start = QPointF()
+        self.start = Point()
         self.last_send = 0.0
         self.group = ""
         self.origin: dict[str, dict[str, Any]] = {}
         self.handle = ""
-        self.marquee: QRectF | None = None
-        self.base_rect = QRectF()
+        self.marquee: Rect | None = None
+        self.base_rect = Rect()
         self.pending_patch: dict[str, dict[str, Any]] = {}
-        self.guides: list[tuple[QPointF, QPointF]] = []
+        self.guides: list[tuple[Point, Point]] = []
         self.additive = False
 
     # ------------------------------------------------------------------ hit tests
-    def _handle_at(self, pos: QPointF) -> tuple[str, str] | None:
+    def _handle_at(self, pos: Point) -> tuple[str, str] | None:
         """Which resize handle or rotation zone is under the pointer, tested in local space."""
         if not self.c.can_edit():
             return None
@@ -107,45 +100,45 @@ class SelectTool(Tool):
         else:
             rect = self.c.selection_rect()
             local = pos
-            if rect.isNull():
+            if rect.is_null():
                 return None
         scale = self.c.scale_factor()
         tolerance = HANDLE_PX / scale
         points = handle_points(rect)
         for name, point in points.items():
-            if abs(local.x() - point.x()) <= tolerance and abs(local.y() - point.y()) <= tolerance:
+            if abs(local.x - point.x) <= tolerance and abs(local.y - point.y) <= tolerance:
                 return ("resize", name)
         zone = ROTATE_ZONE_PX / scale
         if self.c.selection_is_single_rotatable():
             for name in ("nw", "ne", "se", "sw"):
                 point = points[name]
-                dx, dy = local.x() - point.x(), local.y() - point.y()
+                dx, dy = local.x - point.x, local.y - point.y
                 if math.hypot(dx, dy) <= zone and not rect.contains(local):
                     return ("rotate", name)
         return None
 
-    def hover_cursor(self, pos: QPointF) -> Qt.CursorShape:
+    def hover_cursor(self, pos: Point) -> str:
         hit = self._handle_at(pos)
         if hit is None:
-            return Qt.CursorShape.ArrowCursor
+            return "arrow"
         if hit[0] == "rotate":
-            return Qt.CursorShape.CrossCursor
+            return "exchange"
         return {
-            "n": Qt.CursorShape.SizeVerCursor,
-            "s": Qt.CursorShape.SizeVerCursor,
-            "e": Qt.CursorShape.SizeHorCursor,
-            "w": Qt.CursorShape.SizeHorCursor,
-            "nw": Qt.CursorShape.SizeFDiagCursor,
-            "se": Qt.CursorShape.SizeFDiagCursor,
-            "ne": Qt.CursorShape.SizeBDiagCursor,
-            "sw": Qt.CursorShape.SizeBDiagCursor,
+            "n": "sb_v_double_arrow",
+            "s": "sb_v_double_arrow",
+            "e": "sb_h_double_arrow",
+            "w": "sb_h_double_arrow",
+            "nw": "top_left_corner",
+            "se": "bottom_right_corner",
+            "ne": "top_right_corner",
+            "sw": "bottom_left_corner",
         }[hit[1]]
 
     # ------------------------------------------------------------------ mouse
-    def press(self, pos: QPointF, event: Any) -> None:
+    def press(self, pos: Point, event: Any) -> None:
         self.start = pos
         self.group = uuid.uuid4().hex[:8]
-        self.additive = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        self.additive = event.shift
         hit = self._handle_at(pos)
         if hit is not None:
             self.mode, self.handle = hit
@@ -157,7 +150,7 @@ class SelectTool(Tool):
             if not self.additive:
                 self.c.set_selection(set())
             self.mode = "marquee"
-            self.marquee = QRectF(pos, pos)
+            self.marquee = Rect.from_points(pos, pos)
             return
         target = self.c.selection_root(item.obj_id)
         if self.additive:
@@ -179,10 +172,10 @@ class SelectTool(Tool):
                     },
                 }
 
-    def move(self, pos: QPointF, event: Any) -> None:
+    def move(self, pos: Point, event: Any) -> None:
         if self.mode == "marquee" and self.marquee is not None:
-            self.marquee = QRectF(self.start, pos).normalized()
-            self.c.viewport().update()
+            self.marquee = Rect.from_points(self.start, pos).normalized()
+            self.c.refresh_overlay()
         elif self.mode == "move":
             self._drag_move(pos, event)
         elif self.mode == "resize":
@@ -200,9 +193,9 @@ class SelectTool(Tool):
             self.c.session.update(obj_id, patch, group=self.group)
         self.pending_patch = {}
 
-    def _drag_move(self, pos: QPointF, event: Any) -> None:
-        dx, dy = pos.x() - self.start.x(), pos.y() - self.start.y()
-        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+    def _drag_move(self, pos: Point, event: Any) -> None:
+        dx, dy = pos.x - self.start.x, pos.y - self.start.y
+        if event.shift:
             if abs(dx) > abs(dy):
                 dy = 0
             else:
@@ -216,7 +209,7 @@ class SelectTool(Tool):
         """Magenta guides: pull the moving box onto neighbours' edges and centers."""
         self.guides = []
         rect = self.c.origin_rect(self.origin).translated(dx, dy)
-        if rect.isNull():
+        if rect.is_null():
             return dx, dy
         scene = self.c.board_scene
         tolerance = SNAP_PX / self.c.scale_factor()
@@ -226,16 +219,16 @@ class SelectTool(Tool):
             return dx, dy  # guides are a convenience; they must not make dragging laggy
         best_x: tuple[float, float] | None = None
         best_y: tuple[float, float] | None = None
-        ours_x = (rect.left(), rect.center().x(), rect.right())
-        ours_y = (rect.top(), rect.center().y(), rect.bottom())
+        ours_x = (rect.left, rect.center().x, rect.right)
+        ours_y = (rect.top, rect.center().y, rect.bottom)
         for item in others:
             box = item.sceneBoundingRect()
-            for theirs in (box.left(), box.center().x(), box.right()):
+            for theirs in (box.left, box.center().x, box.right):
                 for mine in ours_x:
                     delta = theirs - mine
                     if abs(delta) <= tolerance and (best_x is None or abs(delta) < abs(best_x[0])):
                         best_x = (delta, theirs)
-            for theirs in (box.top(), box.center().y(), box.bottom()):
+            for theirs in (box.top, box.center().y, box.bottom):
                 for mine in ours_y:
                     delta = theirs - mine
                     if abs(delta) <= tolerance and (best_y is None or abs(delta) < abs(best_y[0])):
@@ -243,34 +236,34 @@ class SelectTool(Tool):
         if best_x is not None:
             dx += best_x[0]
             self.guides.append(
-                (QPointF(best_x[1], rect.top() - 2000), QPointF(best_x[1], rect.bottom() + 2000))
+                (Point(best_x[1], rect.top - 2000), Point(best_x[1], rect.bottom + 2000))
             )
         if best_y is not None:
             dy += best_y[0]
             self.guides.append(
-                (QPointF(rect.left() - 2000, best_y[1]), QPointF(rect.right() + 2000, best_y[1]))
+                (Point(rect.left - 2000, best_y[1]), Point(rect.right + 2000, best_y[1]))
             )
-        self.c.viewport().update()
+        self.c.refresh_overlay()
         return dx, dy
 
-    def _drag_resize(self, pos: QPointF, event: Any) -> None:
-        keep_ratio = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+    def _drag_resize(self, pos: Point, event: Any) -> None:
+        keep_ratio = event.shift
         if self.c.selection_is_single_rotatable():
             self._resize_single(pos, keep_ratio)
         else:
             self._resize_multi(pos, keep_ratio)
         self._flush()
 
-    def _resized_rect(self, base: QRectF, local: QPointF, keep_ratio: bool) -> QRectF:
-        left, top, right, bottom = base.left(), base.top(), base.right(), base.bottom()
+    def _resized_rect(self, base: Rect, local: Point, keep_ratio: bool) -> Rect:
+        left, top, right, bottom = base.left, base.top, base.right, base.bottom
         if "w" in self.handle:
-            left = local.x()
+            left = local.x
         if "e" in self.handle:
-            right = local.x()
+            right = local.x
         if "n" in self.handle:
-            top = local.y()
+            top = local.y
         if "s" in self.handle:
-            bottom = local.y()
+            bottom = local.y
         if right - left < MIN_SIZE:
             if "w" in self.handle:
                 left = right - MIN_SIZE
@@ -281,15 +274,14 @@ class SelectTool(Tool):
                 top = bottom - MIN_SIZE
             else:
                 bottom = top + MIN_SIZE
-        rect = QRectF(QPointF(left, top), QPointF(right, bottom))
-        if keep_ratio and base.height() > 0 and len(self.handle) == 2:
-            ratio = base.width() / base.height()
-            rect.setHeight(rect.width() / ratio)
-            if "n" in self.handle:
-                rect.moveBottom(base.bottom())
+        rect = Rect.from_points(Point(left, top), Point(right, bottom))
+        if keep_ratio and base.h > 0 and len(self.handle) == 2:
+            height = rect.w / (base.w / base.h)
+            top = base.bottom - height if "n" in self.handle else rect.y
+            rect = Rect(rect.x, top, rect.w, height)
         return rect
 
-    def _resize_single(self, pos: QPointF, keep_ratio: bool) -> None:
+    def _resize_single(self, pos: Point, keep_ratio: bool) -> None:
         obj_id = next(iter(self.c.selection))
         origin = self.origin.get(obj_id)
         if origin is None:
@@ -310,23 +302,23 @@ class SelectTool(Tool):
         # so the new center is the old transform's image of the new local center.
         center = transform.map(rect.center())
         self.pending_patch[obj_id] = {
-            "x": center.x() - rect.width() / 2,
-            "y": center.y() - rect.height() / 2,
-            "w": rect.width(),
-            "h": rect.height(),
+            "x": center.x - rect.w / 2,
+            "y": center.y - rect.h / 2,
+            "w": rect.w,
+            "h": rect.h,
         }
 
-    def _resize_multi(self, pos: QPointF, keep_ratio: bool) -> None:
+    def _resize_multi(self, pos: Point, keep_ratio: bool) -> None:
         base = self.base_rect
-        if base.width() <= 0 and base.height() <= 0:
+        if base.w <= 0 and base.h <= 0:
             return
         rect = self._resized_rect(base, pos, keep_ratio)
-        sx = rect.width() / base.width() if base.width() else 1.0
-        sy = rect.height() / base.height() if base.height() else 1.0
+        sx = rect.w / base.w if base.w else 1.0
+        sy = rect.h / base.h if base.h else 1.0
         for obj_id, origin in self.origin.items():
             patch: dict[str, Any] = {
-                "x": rect.left() + (origin["x"] - base.left()) * sx,
-                "y": rect.top() + (origin["y"] - base.top()) * sy,
+                "x": rect.left + (origin["x"] - base.left) * sx,
+                "y": rect.top + (origin["y"] - base.top) * sy,
             }
             if origin["type"] in SIZED_TYPES:
                 patch["w"] = max(MIN_SIZE, (origin["w"] or 0) * sx)
@@ -336,28 +328,27 @@ class SelectTool(Tool):
                 patch["y2"] = (origin["y2"] or 0) * sy
             self.pending_patch[obj_id] = patch
 
-    def _drag_rotate(self, pos: QPointF, event: Any) -> None:
+    def _drag_rotate(self, pos: Point, event: Any) -> None:
         obj_id = next(iter(self.c.selection))
         origin = self.origin.get(obj_id)
         if origin is None:
             return
-        center = QPointF(origin["x"] + (origin["w"] or 0) / 2, origin["y"] + (origin["h"] or 0) / 2)
-        begin = math.atan2(self.start.y() - center.y(), self.start.x() - center.x())
-        now = math.atan2(pos.y() - center.y(), pos.x() - center.x())
+        center = Point(origin["x"] + (origin["w"] or 0) / 2, origin["y"] + (origin["h"] or 0) / 2)
+        begin = math.atan2(self.start.y - center.y, self.start.x - center.x)
+        now = math.atan2(pos.y - center.y, pos.x - center.x)
         angle = (origin["rotation"] or 0) + math.degrees(now - begin)
-        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+        if event.shift:
             angle = round(angle / 15) * 15
         self.pending_patch[obj_id] = {"rotation": angle % 360}
         self._flush()
 
-    def release(self, pos: QPointF, event: Any) -> None:
+    def release(self, pos: Point, event: Any) -> None:
         if self.mode == "marquee" and self.marquee is not None:
             rect = self.marquee
             hits = set()
-            if rect.width() > 1 or rect.height() > 1:
+            if rect.w > 1 or rect.h > 1:
                 for item in self.c.board_scene.items(rect):
-                    if isinstance(item, BoardItem):
-                        hits.add(self.c.selection_root(item.obj_id))
+                    hits.add(self.c.selection_root(item.obj_id))
             if self.additive:
                 self.c.set_selection(self.c.selection | hits)
             else:
@@ -370,9 +361,9 @@ class SelectTool(Tool):
                 self.c.refresh_group_bounds(self.group)
         self.mode = None
         self.guides = []
-        self.c.viewport().update()
+        self.c.refresh_overlay()
 
-    def double_click(self, pos: QPointF, event: Any) -> None:
+    def double_click(self, pos: Point, event: Any) -> None:
         item = self.c.board_scene.item_at(pos)
         if item is not None and item.obj["type"] in ("text", "sticky") and self.c.can_edit():
             self.c.edit_text(item.obj_id)
@@ -395,7 +386,7 @@ class SelectTool(Tool):
 class HandTool(Tool):
     name = "hand"
     edits = False
-    cursor = Qt.CursorShape.OpenHandCursor
+    cursor = "hand2"
 
 
 class PenTool(Tool):
@@ -408,16 +399,16 @@ class PenTool(Tool):
         self.last_send = 0.0
         self.stroke_id = ""
 
-    def press(self, pos: QPointF, event: Any) -> None:
-        self.points = [pos.x(), pos.y()]
+    def press(self, pos: Point, event: Any) -> None:
+        self.points = [pos.x, pos.y]
         self.sent = 0
         self.stroke_id = uuid.uuid4().hex[:10]
 
-    def move(self, pos: QPointF, event: Any) -> None:
+    def move(self, pos: Point, event: Any) -> None:
         if not self.points:
             return
-        self.points += [pos.x(), pos.y()]
-        self.c.viewport().update()
+        self.points += [pos.x, pos.y]
+        self.c.refresh_overlay()
         now = time.monotonic()
         if now - self.last_send >= PREVIEW_INTERVAL:
             self.last_send = now
@@ -439,7 +430,7 @@ class PenTool(Tool):
             )
             self.sent += len(fresh)
 
-    def release(self, pos: QPointF, event: Any) -> None:
+    def release(self, pos: Point, event: Any) -> None:
         if not self.points:
             return
         points = simplify(self.points, tolerance=1.0 / max(self.c.scale_factor(), 0.25))
@@ -460,11 +451,11 @@ class PenTool(Tool):
                 "stroke_w": self.c.stroke_width,
                 "name": "Stroke",
             },
-            parent=self.c.frame_at(QPointF(x0, y0)),
+            parent=self.c.frame_at(Point(x0, y0)),
         )
         self.c.session.send_transient("stroke_end", {"id": self.stroke_id})
         self.points = []
-        self.c.viewport().update()
+        self.c.refresh_overlay()
 
     def overlay(self, painter: Any) -> None:
         if len(self.points) >= 4:
@@ -485,28 +476,22 @@ class EraserTool(Tool):
         self.active = False
         self.group = ""
 
-    def press(self, pos: QPointF, event: Any) -> None:
+    def press(self, pos: Point, event: Any) -> None:
         self.active = True
         self.group = uuid.uuid4().hex[:8]
         self._erase(pos)
 
-    def move(self, pos: QPointF, event: Any) -> None:
+    def move(self, pos: Point, event: Any) -> None:
         if self.active:
             self._erase(pos)
 
-    def release(self, pos: QPointF, event: Any) -> None:
+    def release(self, pos: Point, event: Any) -> None:
         self.active = False
 
-    def _erase(self, pos: QPointF) -> None:
+    def _erase(self, pos: Point) -> None:
         radius = self.TOLERANCE / self.c.scale_factor()
-        area = QPainterPath()
-        area.addEllipse(pos, radius, radius)
-        for item in self.c.board_scene.items(area):
-            if (
-                isinstance(item, BoardItem)
-                and item.obj["type"] == "path"
-                and not item.obj["props"].get("locked")
-            ):
+        for item in self.c.board_scene.items(pos, radius):
+            if item.obj["type"] == "path" and not item.obj["props"].get("locked"):
                 self.c.session.delete(item.obj_id, group=self.group)
 
 
@@ -517,34 +502,35 @@ class ShapeTool(Tool):
         super().__init__(canvas)
         self.obj_type = obj_type
         self.name = obj_type
-        self.start: QPointF | None = None
-        self.current = QPointF()
+        self.start: Point | None = None
+        self.current = Point()
         self.shift = False
 
-    def press(self, pos: QPointF, event: Any) -> None:
+    def press(self, pos: Point, event: Any) -> None:
         self.start = pos
         self.current = pos
 
-    def move(self, pos: QPointF, event: Any) -> None:
+    def move(self, pos: Point, event: Any) -> None:
         if self.start is not None:
             self.current = pos
-            self.shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            self.c.viewport().update()
+            self.shift = event.shift
+            self.c.refresh_overlay()
 
-    def _rect(self) -> QRectF:
+    def _rect(self) -> Rect:
         assert self.start is not None
-        dx, dy = self.current.x() - self.start.x(), self.current.y() - self.start.y()
+        dx, dy = self.current.x - self.start.x, self.current.y - self.start.y
         if self.shift:
             side = max(abs(dx), abs(dy))
             dx, dy = math.copysign(side, dx), math.copysign(side, dy)
-        return QRectF(self.start, QPointF(self.start.x() + dx, self.start.y() + dy)).normalized()
+        end = Point(self.start.x + dx, self.start.y + dy)
+        return Rect.from_points(self.start, end).normalized()
 
-    def release(self, pos: QPointF, event: Any) -> None:
+    def release(self, pos: Point, event: Any) -> None:
         if self.start is None:
             return
         rect = self._rect()
-        if rect.width() < 3 and rect.height() < 3:
-            rect = QRectF(self.start.x(), self.start.y(), DEFAULT_SHAPE, DEFAULT_SHAPE)
+        if rect.w < 3 and rect.h < 3:
+            rect = Rect(self.start.x, self.start.y, DEFAULT_SHAPE, DEFAULT_SHAPE)
         self.start = None
         if self.obj_type == "frame":
             props = {"fill": "#FFFFFF", "stroke": "#B3B3B3", "stroke_w": 1}
@@ -562,10 +548,10 @@ class ShapeTool(Tool):
         op = self.c.session.create(
             self.obj_type,
             {
-                "x": rect.x(),
-                "y": rect.y(),
-                "w": rect.width(),
-                "h": rect.height(),
+                "x": rect.x,
+                "y": rect.y,
+                "w": rect.w,
+                "h": rect.h,
                 "name": name,
                 **props,
             },
@@ -589,38 +575,38 @@ class LineTool(Tool):
         super().__init__(canvas)
         self.obj_type = obj_type
         self.name = obj_type
-        self.start: QPointF | None = None
-        self.end = QPointF()
+        self.start: Point | None = None
+        self.end = Point()
 
-    def press(self, pos: QPointF, event: Any) -> None:
+    def press(self, pos: Point, event: Any) -> None:
         self.start = pos
         self.end = pos
 
-    def move(self, pos: QPointF, event: Any) -> None:
+    def move(self, pos: Point, event: Any) -> None:
         if self.start is None:
             return
         self.end = pos
-        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            dx, dy = pos.x() - self.start.x(), pos.y() - self.start.y()
+        if event.shift:
+            dx, dy = pos.x - self.start.x, pos.y - self.start.y
             length = math.hypot(dx, dy)
             angle = round(math.atan2(dy, dx) / ANGLE_STEP) * ANGLE_STEP
-            self.end = QPointF(
-                self.start.x() + length * math.cos(angle),
-                self.start.y() + length * math.sin(angle),
+            self.end = Point(
+                self.start.x + length * math.cos(angle),
+                self.start.y + length * math.sin(angle),
             )
-        self.c.viewport().update()
+        self.c.refresh_overlay()
 
-    def release(self, pos: QPointF, event: Any) -> None:
+    def release(self, pos: Point, event: Any) -> None:
         if self.start is None:
             return
-        dx, dy = self.end.x() - self.start.x(), self.end.y() - self.start.y()
+        dx, dy = self.end.x - self.start.x, self.end.y - self.start.y
         if math.hypot(dx, dy) < 3:
             dx, dy = DEFAULT_SHAPE, 0.0
         op = self.c.session.create(
             self.obj_type,
             {
-                "x": self.start.x(),
-                "y": self.start.y(),
+                "x": self.start.x,
+                "y": self.start.y,
                 "x2": dx,
                 "y2": dy,
                 "stroke": self.c.stroke_color,
@@ -644,14 +630,14 @@ class LineTool(Tool):
 
 class TextTool(Tool):
     name = "text"
-    cursor = Qt.CursorShape.IBeamCursor
+    cursor = "xterm"
 
-    def press(self, pos: QPointF, event: Any) -> None:
+    def press(self, pos: Point, event: Any) -> None:
         op = self.c.session.create(
             "text",
             {
-                "x": pos.x(),
-                "y": pos.y(),
+                "x": pos.x,
+                "y": pos.y,
                 "w": 240,
                 "h": 40,
                 "text": "",
@@ -670,12 +656,12 @@ class TextTool(Tool):
 class StickyTool(Tool):
     name = "sticky"
 
-    def press(self, pos: QPointF, event: Any) -> None:
+    def press(self, pos: Point, event: Any) -> None:
         op = self.c.session.create(
             "sticky",
             {
-                "x": pos.x() - 80,
-                "y": pos.y() - 80,
+                "x": pos.x - 80,
+                "y": pos.y - 80,
                 "w": 160,
                 "h": 160,
                 "text": "",
@@ -694,6 +680,6 @@ class StickyTool(Tool):
 class CommentTool(Tool):
     name = "comment"
 
-    def press(self, pos: QPointF, event: Any) -> None:
+    def press(self, pos: Point, event: Any) -> None:
         self.c.create_comment(pos)
         self.c.select_tool_after_create()

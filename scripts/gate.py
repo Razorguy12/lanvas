@@ -63,7 +63,7 @@ GATE_MANUAL: dict[int, list[str]] = {
 
 
 def run_tests(xml_path: Path) -> tuple[dict[str, list[str]], int]:
-    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": str(ROOT)}
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
     cmd = [sys.executable, "-m", "pytest", "-q", f"--junitxml={xml_path}", "-p", "no:cacheprovider"]
     code = subprocess.run(cmd, cwd=ROOT, env=env).returncode
     results: dict[str, list[str]] = {}

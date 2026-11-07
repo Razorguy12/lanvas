@@ -1,13 +1,10 @@
-"""Pytest setup: reproducible randomness (--seed) and headless Qt for every UI test."""
+"""Pytest setup: reproducible randomness (--seed) and a Tk root for every UI test."""
 
 from __future__ import annotations
 
-import os
 import random
 
 import pytest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -27,7 +24,17 @@ def seed(request: pytest.FixtureRequest) -> int:
 
 @pytest.fixture(scope="session")
 def qapp():
-    from PyQt6.QtWidgets import QApplication
+    """A hidden Tk root for widgets created without a window, as QApplication was."""
+    import tkinter as tk
 
-    app = QApplication.instance() or QApplication([])
-    yield app
+    from client import theme
+
+    theme.load_fonts()  # before the first Tk, so Tk's font machinery can see the bundled fonts
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:  # no display at all
+        pytest.skip(f"Tk cannot start: {exc}")
+    root.geometry("320x200+-4000+-4000")  # shown (so isVisible holds) but out of the way
+    theme.apply(root)
+    yield root
+    root.destroy()

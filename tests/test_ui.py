@@ -1,16 +1,14 @@
-"""Offscreen UI tests: real widgets and a real server, driven through the same code as a user."""
+"""UI tests: real Tk widgets and a real server, driven through the same code as a user."""
 
 from __future__ import annotations
 
 import base64
+import io
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QEventLoop, QPoint, QPointF, Qt
-from PyQt6.QtGui import QFontDatabase, QImage
-from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PIL import Image
 
 from client import dialogs, paths, theme
 from client.app import AppWindow
@@ -21,7 +19,9 @@ from client.export.pdf import export_pdf
 from client.export.png import export_raster, raster_size
 from client.export.renderer import SCOPE_FRAME, SCOPE_SELECTION, Scope, drive
 from client.export.svg import export_svg
+from client.geom import Point
 from client.request_screen import STATE_DENIED
+from client.widgets import pump_ui
 from common.fileformat import Trust, board_hash, build_document, decode_lanvas, encode_lanvas
 from common.identity import Identity
 from common.model import Board, apply_op
@@ -34,10 +34,15 @@ pytestmark = [pytest.mark.ui]
 
 def spin(app, predicate, timeout=8.0):
     def check():
-        app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 20)
+        app.update()
+        pump_ui()
         return predicate()
 
     return wait_until(check, timeout, step=0.005)
+
+
+def png(data: bytes) -> Image.Image:
+    return Image.open(io.BytesIO(data))
 
 
 def _obj(board, obj_id, kind, **props):
@@ -79,11 +84,9 @@ def srv(tmp_path):
 
 
 def make_window(qapp, home) -> AppWindow:
-    theme.load_fonts()
-    theme.apply(qapp)
     window = AppWindow(udp_port=0, start_discovery=False)
     window.launcher.name.setText("Tester")
-    window.show()
+    window.update()
     return window
 
 
@@ -92,7 +95,7 @@ def window(qapp, home):
     win = make_window(qapp, home)
     yield win
     win.close()
-    win.deleteLater()
+    theme.apply(qapp)
 
 
 def enter_as_owner(qapp, window, port, name="Sprint-1"):
@@ -101,34 +104,23 @@ def enter_as_owner(qapp, window, port, name="Sprint-1"):
 
 
 def canvas_point(canvas, x, y):
-    return canvas.mapFromScene(QPointF(x, y))
+    return canvas.mapFromScene(Point(x, y))
+
+
+class MouseEvent:
+    """What a Tk mouse event carries: widget coordinates and the modifier state."""
+
+    def __init__(self, x: float, y: float, state: int = 0) -> None:
+        self.x, self.y, self.state = round(x), round(y), state
 
 
 def drag(canvas, a, b, steps=4):
+    """Press, move and release through the canvas's own event handlers, as Tk delivers them."""
     start, end = canvas_point(canvas, *a), canvas_point(canvas, *b)
-    viewport = canvas.viewport()
-    QTest.mousePress(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    canvas._press(MouseEvent(*start), 1)
     for i in range(1, steps + 1):
-        pos = QPoint(start.x() + (end.x() - start.x()) * i // steps, start.y() + (end.y() - start.y()) * i // steps)
-        QTest.mouseMove(viewport, pos)
-        event_buttons_move(canvas, pos)
-    QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
-
-
-def event_buttons_move(canvas, pos):
-    """QTest.mouseMove sends no button state, so a drag move is delivered explicitly."""
-    from PyQt6.QtCore import QEvent
-    from PyQt6.QtGui import QMouseEvent
-
-    event = QMouseEvent(
-        QEvent.Type.MouseMove,
-        QPointF(pos),
-        QPointF(canvas.viewport().mapToGlobal(pos)),
-        Qt.MouseButton.NoButton,
-        Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
-    )
-    QApplication.sendEvent(canvas.viewport(), event)
+        canvas._move(MouseEvent(start[0] + (end[0] - start[0]) * i / steps, start[1] + (end[1] - start[1]) * i / steps))
+    canvas._release(MouseEvent(*end), 1)
 
 
 # ------------------------------------------------------------------ export
@@ -139,28 +131,28 @@ def test_EX_01_png_size_and_alpha(qapp, scale, transparent):
     scene = scene_for(sample_board())
     width, height = raster_size(scene, Scope(), scale)
     data = drive(export_raster(scene, Scope(), "PNG", scale, transparent, "#ABCDEF"))
-    image = QImage.fromData(data, "PNG")
-    assert (image.width(), image.height()) == (width, height)
-    corner = image.pixelColor(0, 0)
+    image = png(data).convert("RGBA")
+    assert image.size == (width, height)
+    corner = image.getpixel((0, 0))
     if transparent:
-        assert corner.alpha() == 0
+        assert corner[3] == 0
     else:
-        assert corner.alpha() == 255 and corner.name().upper() == "#ABCDEF"
+        assert corner == (0xAB, 0xCD, 0xEF, 255)
     # The center of the red rectangle, located from the export bounds rather than a guessed offset.
     from client.export.renderer import bounds_of, collect_items
 
     rect = bounds_of(collect_items(scene, Scope()))
-    red = image.pixelColor(round((35 - rect.x()) * scale), round((35 - rect.y()) * scale))
-    assert red.alpha() == 255 and red.red() > 200 and red.green() < 60
+    red = image.getpixel((round((35 - rect.x) * scale), round((35 - rect.y) * scale)))
+    assert red[3] == 255 and red[0] > 200 and red[1] < 60
 
 
 @pytest.mark.export
 def test_EX_01_export_contains_no_overlay_and_paints_objects(qapp):
     scene = scene_for(sample_board())
     data = drive(export_raster(scene, Scope(SCOPE_SELECTION, selection=frozenset({"e"})), "PNG", 1, False, "#FFFFFF"))
-    image = QImage.fromData(data, "PNG")
-    center = image.pixelColor(image.width() // 2, image.height() // 2)
-    assert center.green() > 200 and center.red() < 60  # the green ellipse really was painted
+    image = png(data).convert("RGBA")
+    center = image.getpixel((image.width // 2, image.height // 2))
+    assert center[1] > 200 and center[0] < 60  # the green ellipse really was painted
 
 
 @pytest.mark.export
@@ -168,9 +160,9 @@ def test_EX_02_jpeg_opens_background_filled(qapp):
     scene = scene_for(sample_board())
     data = drive(export_raster(scene, Scope(), "JPEG", 1, True, "#FFFFFF"))
     assert data[:2] == b"\xff\xd8"
-    image = QImage.fromData(data, "JPEG")
-    assert not image.isNull() and image.pixelColor(0, 0).alpha() == 255
-    assert image.pixelColor(0, 0).lightness() > 240
+    image = png(data)
+    assert image.format == "JPEG" and image.mode == "RGB"  # no alpha channel at all
+    assert min(image.getpixel((0, 0))) > 240
 
 
 @pytest.mark.export
@@ -186,8 +178,7 @@ def test_EX_03_svg_valid_xml_text_stays_text(qapp):
 @pytest.mark.export
 def test_EX_03_svg_embeds_images_as_base64(qapp):
     board = Board()
-    image = QImage(4, 4, QImage.Format.Format_RGB32)
-    image.fill(Qt.GlobalColor.red)
+    image = Image.new("RGB", (4, 4), "red")
     from client.boardpage import encode_image
 
     _obj(board, "i", "image", x=0, y=0, w=40, h=40, image_data=encode_image(image))
@@ -234,9 +225,9 @@ def test_EX_06_scope_selection_and_frame_only_those_objects(qapp):
 
     assert {i.obj_id for i in collect_items(scene, Scope(SCOPE_SELECTION, selection=frozenset({"e", "p"})))} == {"e", "p"}
     assert {i.obj_id for i in collect_items(scene, Scope(SCOPE_FRAME, frame_id="frame1"))} == {"frame1", "r"}
-    frame_png = QImage.fromData(drive(export_raster(scene, Scope(SCOPE_FRAME, frame_id="frame1"))), "PNG")
-    whole_png = QImage.fromData(drive(export_raster(scene, Scope())), "PNG")
-    assert frame_png.width() < whole_png.width()
+    frame_png = png(drive(export_raster(scene, Scope(SCOPE_FRAME, frame_id="frame1"))))
+    whole_png = png(drive(export_raster(scene, Scope())))
+    assert frame_png.width < whole_png.width
 
 
 @pytest.mark.export
@@ -253,7 +244,7 @@ def test_EX_06_hidden_objects_and_comments_not_exported(qapp):
 @pytest.mark.export
 def test_EX_07_bundled_font_loaded_and_embedded(qapp):
     assert theme.load_fonts()
-    assert theme.FONT_FAMILY in QFontDatabase.families()
+    assert theme.font_available(qapp)
     data = drive(export_pdf(scene_for(sample_board()), Scope(), "fit"))
     assert b"Inter" in data  # the PDF carries the bundled font itself, so it renders anywhere
 
@@ -290,7 +281,7 @@ def test_EX_08_large_board_exports_in_chunks(qapp):
         ticks.append(time.perf_counter() - begin)
     assert len(ticks) >= 20  # work is split, so the UI can run between chunks
     assert max(ticks) < 0.1, f"longest uninterrupted chunk {max(ticks):.3f}s"
-    assert not QImage.fromData(data, "PNG").isNull()
+    assert png(data).size[0] > 0
 
 
 @pytest.mark.export
@@ -340,7 +331,6 @@ def test_DS_07_row_asks_for_code_inline(qapp):
 
     entry = BoardEntry("s", "r1", "Coded", "PC", "A", "10.0.0.1", 47801, None, True, True, 2)
     row = BoardRow(entry)
-    row.show()
     got = []
     row.join.connect(lambda e, code: got.append(code))
     row.join_button.click()
@@ -380,8 +370,10 @@ def test_full_flow_create_draw_chat_save(qapp, window, srv, home):
     window.board.chat.input.setText("hello <b>world</b>")
     window.board.chat._send()
     assert spin(qapp, lambda: len(session.chat.room.messages) == 1)
-    html_shown = window.board.chat.view.toHtml()
-    assert "&lt;b&gt;world" in html_shown  # user text is never interpreted as markup
+    shown = window.board.chat.view.toPlainText()
+    assert "hello <b>world</b>" in shown  # user text is never interpreted as markup
+    start = window.board.chat.view.search("world", "1.0")
+    assert "bold" not in window.board.chat.view.tag_names(start)
 
     window.board.save()
     assert spin(qapp, lambda: session.save_state == "saved")
@@ -517,7 +509,7 @@ def test_viewer_tools_disabled_with_explanation(qapp, window, srv):
     board = window.board
     assert not board.tool_buttons["pen"].isEnabled()
     assert "Viewers can't edit" in board.tool_buttons["pen"].toolTip()
-    assert board.role_chip.text() == "VIEWER"
+    assert board.role_chip.cget("text") == "VIEWER"
     board.canvas.set_tool("pen")
     assert board.canvas.tool.name == "select"
 
@@ -572,10 +564,10 @@ def test_private_message_ui_strip_and_badge(qapp, window, srv):
     peer = add_member(_owner_bot(session, port), port, "Bob")
     assert spin(qapp, lambda: peer.fp in session.members)
     chat = window.board.chat
-    window.board.tabs.setCurrentWidget(chat)
+    window.board.tabs.select(chat)
     peer.send_dm(session.fp, "secret hello")
     assert spin(qapp, lambda: session.chat.total_unread() == 1)
-    assert "•1" in window.board.tabs.tabText(window.board.tabs.indexOf(chat))
+    assert "•1" in window.board.chat_tab_text()
     window.board.open_private(peer.fp)
     assert spin(qapp, lambda: session.chat.total_unread() == 0)
     assert "only you and Bob can read" in chat.strip.text() and chat.strip.isVisible()
@@ -622,7 +614,7 @@ def test_inspector_lists_frames_and_chaos_controls(qapp, window, srv):
     session.create("rect", {"x": 1, "y": 1, "w": 5, "h": 5}, obj_id="r")
     assert spin(qapp, lambda: not session.doc.pending)
     board.inspector.refresh()
-    kinds = {board.inspector.table.item(r, 2).text() for r in range(board.inspector.table.rowCount())}
+    kinds = {row[2] for row in board.inspector.rows()}
     assert {"OP", "OP_ACK", "WELCOME"} <= kinds
     core = window.net.core
     board.inspector.latency.setValue(300)
@@ -688,7 +680,7 @@ def test_SV_07_recover_banner_and_dialog(qapp, home, srv):
         room.acl.add_member(window.identity.fingerprint, "Tester", "editor")
         crashed = window.crashed[0]
         dialog = dialogs.RecoverDialog(crashed)
-        text = dialog.findChild(type(window.launcher.banner_text)).text()
+        text = dialog.text.text()
         assert "Sprint-1" in text and "1 unsaved change" in text and "1 unsent message" in text
         window.adopting = crashed
         window.connect_to(crashed.host, crashed.port, {"room_id": crashed.room_id})
@@ -776,7 +768,9 @@ def test_toasts_are_capped(qapp, window):
 
     for i in range(10):
         window.show_toast(f"notice {i}")
-    assert len(window.findChildren(Toast)) <= MAX_TOASTS
+    window.update()
+    shown = [w for w in window.winfo_children() if isinstance(w, Toast)]
+    assert len(shown) <= MAX_TOASTS and len(window.toasts()) <= MAX_TOASTS
 
 
 def test_private_indicators_use_bundled_text_and_icons_not_emoji(qapp, window, srv):
@@ -789,8 +783,8 @@ def test_private_indicators_use_bundled_text_and_icons_not_emoji(qapp, window, s
     window.board.open_private(peer.fp)
     chat = window.board.chat
     assert chat.strip.text().startswith("Private")
-    row = next(chat.channels.item(i) for i in range(chat.channels.count()) if "Bob" in chat.channels.item(i).text())
-    assert not row.icon().isNull()
+    row = next(i for i in range(chat.channels.count()) if "Bob" in chat.channels.item_text(i))
+    assert chat.channels.item_icon(row)
     root = Path(__file__).resolve().parent.parent
     for path in (root / "client").rglob("*.py"):
         assert "🔒" not in path.read_text(encoding="utf-8"), path
@@ -811,10 +805,10 @@ def test_kicked_member_returned_to_launcher(qapp, window, srv):
 def test_export_dialog_only_enables_relevant_options(qapp):
     dialog = dialogs.ExportDialog([("f", "F1")], True, lambda d: "x")
     assert dialog.scale.isEnabled() and not dialog.page.isEnabled() and not dialog.protect.isEnabled()
-    pdf = next(b for b in dialog.format_group.buttons() if b.text() == "PDF")
+    pdf = next(b for b in dialog.format_group.buttons if b.text() == "PDF")
     pdf.setChecked(True)
     assert dialog.page.isEnabled() and not dialog.scale.isEnabled()
-    native = next(b for b in dialog.format_group.buttons() if b.text() == ".lanvas")
+    native = next(b for b in dialog.format_group.buttons if b.text() == ".lanvas")
     native.setChecked(True)
     assert dialog.protect.isEnabled() and not dialog.scope_frame.isEnabled()
 
@@ -823,13 +817,12 @@ def test_image_object_round_trip(qapp):
     from client.boardpage import encode_image
     from client.canvas.items import BoardItem
 
-    image = QImage(3000, 2000, QImage.Format.Format_RGB32)
-    image.fill(Qt.GlobalColor.blue)
+    image = Image.new("RGB", (3000, 2000), "blue")
     data = encode_image(image)
-    decoded = QImage.fromData(base64.b64decode(data))
-    assert max(decoded.width(), decoded.height()) == 1600  # downscaled to fit the size limit
+    decoded = png(base64.b64decode(data))
+    assert max(decoded.size) == 1600  # downscaled to fit the size limit
     obj = {"id": "i", "type": "image", "parent": None, "z": "V", "deleted": False, "props": {"x": 0, "y": 0, "w": 10, "h": 10, "image_data": data}}
-    assert not BoardItem(obj)._image.isNull()
+    assert BoardItem(obj)._image is not None
 
 
 @pytest.mark.perf
@@ -854,14 +847,22 @@ def test_simplify_edge_cases():
 
 def test_every_ui_glyph_exists_in_the_bundled_font(qapp):
     """Regression: anything missing from Inter would fall back to whatever the machine has."""
-    from PyQt6.QtGui import QRawFont
+    from PIL import ImageDraw, ImageFont
 
     root = Path(__file__).resolve().parent.parent
-    font = QRawFont(str(root / "client/assets/fonts/Inter-Regular.ttf"), 12)
+    font = ImageFont.truetype(str(root / "client/assets/fonts/Inter-Regular.ttf"), 24)
+
+    def glyph(ch: str) -> bytes:
+        image = Image.new("L", (48, 48))
+        ImageDraw.Draw(image).text((8, 8), ch, font=font, fill=255)
+        return image.tobytes()
+
+    notdef = glyph("\U0010fffd")  # what a missing glyph renders as
+    assert glyph("✓") != notdef and glyph("\u4e2d") == notdef  # the probe can tell them apart
     missing = {}
     for path in (root / "client").rglob("*.py"):
         for ch in set(path.read_text(encoding="utf-8")):
-            if ord(ch) > 126 and not font.supportsCharacter(ch):
+            if ord(ch) > 126 and glyph(ch) == notdef:
                 missing.setdefault(path.name, []).append(ch)
     assert not missing
 

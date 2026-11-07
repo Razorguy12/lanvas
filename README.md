@@ -1,6 +1,6 @@
 # LANvas
 
-A Figma-style, offline, LAN-only collaborative whiteboard, built on raw TCP and UDP sockets with PyQt6.  
+A Figma-style, offline, LAN-only collaborative whiteboard, built on raw TCP and UDP sockets with a tkinter UI.  
 The room creator decides who can view or edit. Boards on the network appear by themselves, and a crash costs nothing.
 
 - [`ProductContext.md`](ProductContext.md): what and why
@@ -34,7 +34,7 @@ python -m build.make                                   # writes dist/lanvas-serv
 Check a build with no Python environment involved (against a running server):
 
 ```bash
-QT_QPA_PLATFORM=offscreen dist/lanvas-client/lanvas-client --smoke 127.0.0.1 47801 /tmp/out
+dist/lanvas-client/lanvas-client --smoke 127.0.0.1 47801 /tmp/out
 ```
 
 ## Firewall (XP-04)
@@ -49,7 +49,7 @@ LANvas needs **TCP 47801** (app) and **UDP 47800** (discovery), inbound on the s
 
 If discovery is blocked or the network isolates clients from each other, **Join by address** still works: it needs only TCP 47801.
 
-On Linux, Qt 6.5+ on X11 may need `libxcb-cursor0`. On Wayland, `QT_QPA_PLATFORM=xcb` is a fallback.
+The client needs Python built with Tk (tkinter). On Fedora: `sudo dnf install python3-tkinter`; on Ubuntu/Debian: `sudo apt install python3-tk`. Packaged builds include Tk.
 
 ## Tests
 

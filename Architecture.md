@@ -13,20 +13,20 @@
 | Concern | Choice | Why |
 |---|---|---|
 | Language | Python 3.11+ | Required/recommended; fast to build |
-| GUI | **PyQt6** (`QGraphicsScene` / `QGraphicsView`) | Scene graph gives selection, zoom, pan, transforms, z-order |
+| GUI | **tkinter** (standard library, ttk themed) with a custom canvas: a scene of items rendered by Pillow, overlays as Tk canvas items | No UI toolkit to install; geometry, hit testing, z-order and transforms live in `client/geom.py` and `client/canvas/` |
 | Transport | **TCP** via raw `socket` | Reliable, ordered per connection |
 | Discovery | **UDP** broadcast via raw `socket` | Connectionless, ideal for "who is out there?" |
 | Server I/O | `socket` + `selectors` (single thread) | Low-level, no races, trivial ordering. **No asyncio streams, no socketserver, no websockets** |
 | Crypto | `cryptography` (Ed25519, AES-256-GCM, scrypt, optional TLS cert gen); stdlib `hmac`, `hashlib`, `ssl` | Identity, signed/encrypted save files, transport protection |
-| Export | Qt built-ins: `QImage` (PNG/JPEG), `QSvgGenerator` (SVG), `QPdfWriter` (PDF) | No extra dependency, works offline |
+| Export | One painter API (`client/canvas/paint.py`) with three backends: Pillow raster (PNG/JPEG and the live canvas), an SVG writer, and a small PDF writer that embeds the Inter font | Works offline; SVG and PDF stay vector with real text |
 | Packaging | PyInstaller (build per OS) | Standalone executables |
 | Tests | `pytest` | Protocol, ordering, ACL, chaos, persistence |
 
 ## 2. System overview
 
 ```
-┌────────────────────────── Client (PyQt6) ──────────────────────────┐
-│ UI thread: Canvas(QGraphicsScene) Toolbar Layers Props Chat Users  │
+┌────────────────────────── Client (tkinter) ────────────────────────┐
+│ UI thread: Canvas(BoardScene)  Toolbar Layers Props Chat Users     │
 │    ▲ signals/slots                                    │ commands   │
 │ DocumentModel (objects, local undo stack, pending ops)│            │
 │ ChatModel (channels, history pages, unread, outbox)   │            │
@@ -73,10 +73,10 @@ lanvas/
 │   └─ recovery.py      # startup integrity scan and repair
 ├─ client/
 │   ├─ main.py
-│   ├─ transport.py     # NetCore: socket thread, handshake, reconnect, inspector, chaos (no Qt)
-│   ├─ net.py           # NetWorker: re-emits NetCore events as queued Qt signals
-│   ├─ session.py       # one open room: document, chat, journal, saving (no Qt)
-│   ├─ boardlist.py     # board tracking, expiry, validation of announces (no Qt)
+│   ├─ transport.py     # NetCore: socket thread, handshake, reconnect, inspector, chaos (no UI)
+│   ├─ net.py           # NetWorker: hands NetCore events to the UI thread through the UI queue
+│   ├─ session.py       # one open room: document, chat, journal, saving (no UI)
+│   ├─ boardlist.py     # board tracking, expiry, validation of announces (no UI)
 │   ├─ discovery.py     # DiscoveryWorker (QThread), live board list
 │   ├─ document.py      # client-side model, optimistic apply, undo/redo
 │   ├─ chatmodel.py     # channels, history paging, unread counts, outbox
@@ -90,7 +90,7 @@ lanvas/
 └─ build/ (pyinstaller specs)
 ```
 
-Rules: `common/` and `server/` import **no Qt**. `client/` never imports `server/`. `common/fileformat.py` is shared so that the server and client produce byte-identical canonical JSON and hashes.
+Rules: `common/` and `server/` import **no UI code** (no tkinter, no Pillow). `client/` never imports `server/`. `common/fileformat.py` is shared so that the server and client produce byte-identical canonical JSON and hashes.
 
 ## 4. Protocol
 
@@ -354,11 +354,11 @@ Requests queue in the ACL; owner gets them on next connect. Approved members kee
 
 ## 10. Threading (client)
 
-- **UI thread:** all Qt objects, including the scene render used by export. Never blocks on the network or on large disk writes.
-- **NetWorker thread:** owns the TCP socket; receives frames, emits Qt signals (`op_received`, `chat_received`, `presence`, `save_ack`, …); sends from a thread-safe queue.
+- **UI thread:** all Tk widgets, including the scene render used by export. Never blocks on the network or on large disk writes.
+- **NetWorker thread:** owns the TCP socket; receives frames and hands each event to the UI thread through a thread-safe queue (`client.widgets.call_in_ui`); sends from a thread-safe queue.
 - **DiscoveryWorker thread:** owns the UDP socket; emits `boards_changed(list)`.
 - **IO worker (`QThreadPool`):** recovery journal writes, `.lanvas` save, encoding and writing export files.
-- Qt widgets are never touched from worker threads.
+- Tk widgets are never touched from worker threads; Tk is not thread-safe.
 
 ## 11. Packet Inspector and Chaos Simulator (client-side shim)
 
@@ -434,10 +434,10 @@ All exports are written atomically through the durable writer. Scope can be: who
 
 | Format | How | Notes |
 |---|---|---|
-| **PNG** | `QGraphicsScene.render` into a `QImage` | 1x / 2x / 4x scale, transparent or canvas background |
+| **PNG** | Pillow raster painter, each item supersampled 2x | 1x / 2x / 4x scale, transparent or canvas background |
 | **JPEG** | same, quality 90 | no transparency; background filled |
-| **SVG** | `QSvgGenerator` | vector; text kept as text; images embedded as base64 |
-| **PDF** | `QPdfWriter` | vector; page = fit to content, or A4/A3 landscape; option **each frame as one page** |
+| **SVG** | SVG writer (`client/export/svg.py`) | vector; text kept as text; images embedded as base64 |
+| **PDF** | PDF writer (`client/export/pdf.py`), Inter embedded | vector; page = fit to content, or A4/A3 landscape; option **each frame as one page** |
 | **`.lanvas`** | `common/fileformat.py` | native, lossless, re-openable; see below |
 
 **`.lanvas` file (version 2)**
@@ -486,7 +486,7 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 |---|---|---|---|
 | **L0 Unit** | Pure functions: framing, `apply_op`, fractional index, RDP, identity, ACL rules, chat validation, file format, CRC/atomic writer | nothing | every save / push |
 | **L1 Component** | Server loop and connection state machine over `socket.socketpair()` and a fake clock | nothing | every push |
-| **L2 Integration** | Real server on `127.0.0.1:0` (ephemeral port) plus headless **bot clients** over raw TCP and UDP; no Qt | one machine | every push |
+| **L2 Integration** | Real server on `127.0.0.1:0` (ephemeral port) plus headless **bot clients** over raw TCP and UDP; no UI | one machine | every push |
 | **L3 LAN system** | Real GUI clients on **3+ physical machines**, mixed OS, internet disabled | a router/hotspot | at every phase gate that includes a GUI, plus once per working session from Phase 3 on |
 | **L4 Acceptance** | The demo script and requirement checklist (`ProductContext.md` §12, §16) | whole team | Phase 7 gate and demo day |
 
@@ -498,7 +498,7 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 - `FaultyFS` wraps the durable writer to inject a crash after any write step (after `tmp` write, before `replace`, mid-append).
 - `FakeClock` injected into the server for heartbeat, retention, and timeout tests (no real sleeping).
 - Randomized tests print their **seed** on failure and accept `--seed` to reproduce.
-- UI and export tests use `QT_QPA_PLATFORM=offscreen`; nothing in L0-L2 server tests may need a display.
+- UI tests need a display for Tk (on a headless CI machine, run them under `xvfb-run`); export tests and L0-L2 server tests need no display.
 - pytest markers: `unit`, `integration`, `security`, `chaos`, `perf`, `lan`, `chat`, `discovery`, `persist`, `export`.
 
 ### 14.3 Test case catalogue

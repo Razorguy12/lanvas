@@ -1,10 +1,17 @@
-"""Monochrome 16 px line icons drawn in the Lucide style, as inline SVG with no external files."""
+"""Monochrome 16 px line icons drawn in the Lucide style, from inline SVG path data.
+
+The paths are rasterized here with a tiny path flattener and Pillow, supersampled for smooth
+edges, so there are no icon files and no SVG library involved.
+"""
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QByteArray, QRectF, QSize, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
-from PyQt6.QtSvg import QSvgRenderer
+import math
+import re
+from functools import lru_cache
+from typing import Any
+
+from PIL import Image, ImageDraw
 
 _PATHS = {
     "select": '<path d="M4 3l7 18 2.5-7.5L21 11z"/>',
@@ -47,35 +54,245 @@ _PATHS = {
     "palette": '<circle cx="12" cy="12" r="9"/><circle cx="8" cy="10" r="1"/><circle cx="12" cy="7.5" '
     'r="1"/><circle cx="16" cy="10" r="1"/>',
 }
+STROKE = 1.8
+SUPERSAMPLE = 4
+ICON_SIZE = 16
 
 
 def svg(name: str, color: str) -> bytes:
+    """The icon as a standalone SVG document (kept for export and for tests)."""
     body = _PATHS[name]
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{color}" '
-        f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{body}</svg>'
+        f'stroke-width="{STROKE}" stroke-linecap="round" stroke-linejoin="round">{body}</svg>'
     ).encode()
 
 
-def pixmap(name: str, color: str = "#1E1E1E", size: int = 32) -> QPixmap:
-    renderer = QSvgRenderer(QByteArray(svg(name, color)))
-    image = QPixmap(size, size)
-    image.fill(QColor(0, 0, 0, 0))
-    painter = QPainter(image)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    renderer.render(painter, QRectF(0, 0, size, size))
-    painter.end()
-    return image
+# ---------------------------------------------------------------------- SVG geometry
+_NUMBER = re.compile(r"-?(?:\d+\.?\d*|\.\d+)(?:[eE]-?\d+)?")
+_ATTR = re.compile(r'(\w+)="([^"]*)"')
 
 
-def icon(name: str, color: str = "#1E1E1E", checked_color: str = "#FFFFFF") -> QIcon:
-    result = QIcon()
-    result.addPixmap(pixmap(name, color), QIcon.Mode.Normal, QIcon.State.Off)
-    result.addPixmap(pixmap(name, checked_color), QIcon.Mode.Normal, QIcon.State.On)
-    # A selected row is accent-colored, where a muted or purple icon would simply disappear.
-    result.addPixmap(pixmap(name, checked_color), QIcon.Mode.Selected, QIcon.State.Off)
-    return result
+def _arc(x1, y1, rx, ry, phi, large, sweep, x2, y2, steps=16):  # noqa: ANN001, ANN202
+    """SVG endpoint arc to points (SVG spec, appendix F.6)."""
+    if rx == 0 or ry == 0:
+        return [(x2, y2)]
+    phi = math.radians(phi)
+    cp, sp = math.cos(phi), math.sin(phi)
+    dx, dy = (x1 - x2) / 2, (y1 - y2) / 2
+    x1p, y1p = cp * dx + sp * dy, -sp * dx + cp * dy
+    rx, ry = abs(rx), abs(ry)
+    lam = x1p**2 / rx**2 + y1p**2 / ry**2
+    if lam > 1:
+        rx, ry = rx * math.sqrt(lam), ry * math.sqrt(lam)
+    num = rx**2 * ry**2 - rx**2 * y1p**2 - ry**2 * x1p**2
+    den = rx**2 * y1p**2 + ry**2 * x1p**2
+    coef = math.sqrt(max(0.0, num / den)) if den else 0.0
+    if large == sweep:
+        coef = -coef
+    cxp, cyp = coef * rx * y1p / ry, -coef * ry * x1p / rx
+    cx = cp * cxp - sp * cyp + (x1 + x2) / 2
+    cy = sp * cxp + cp * cyp + (y1 + y2) / 2
+
+    def angle(ux, uy, vx, vy):  # noqa: ANN001, ANN202
+        a = math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)
+        return a
+
+    t1 = angle(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry)
+    dt = angle((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry)
+    if not sweep and dt > 0:
+        dt -= 2 * math.pi
+    elif sweep and dt < 0:
+        dt += 2 * math.pi
+    pts = []
+    for i in range(1, steps + 1):
+        t = t1 + dt * i / steps
+        x, y = rx * math.cos(t), ry * math.sin(t)
+        pts.append((cp * x - sp * y + cx, sp * x + cp * y + cy))
+    return pts
 
 
-ICON_SIZE = QSize(16, 16)
-__all__ = ["ICON_SIZE", "Qt", "icon", "pixmap", "svg"]
+def _cubic(p0, p1, p2, p3, steps=12):  # noqa: ANN001, ANN202
+    out = []
+    for i in range(1, steps + 1):
+        t = i / steps
+        u = 1 - t
+        out.append((
+            u**3 * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t**3 * p3[0],
+            u**3 * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t**3 * p3[1],
+        ))
+    return out
+
+
+def path_polylines(d: str) -> list[tuple[list[tuple[float, float]], bool]]:
+    """Flatten SVG path data into (points, closed) polylines."""
+    out: list[tuple[list[tuple[float, float]], bool]] = []
+    current: list[tuple[float, float]] = []
+    x = y = sx = sy = 0.0
+    last_ctrl: tuple[float, float] | None = None
+    cmd = ""
+    pos = 0
+
+    def skip() -> None:
+        nonlocal pos
+        while pos < len(d) and d[pos] in " ,\t\n":
+            pos += 1
+
+    def num() -> float:
+        nonlocal pos
+        skip()
+        match = _NUMBER.match(d, pos)
+        if match is None:
+            raise ValueError(f"bad path data at {pos}: {d!r}")
+        pos = match.end()
+        return float(match.group())
+
+    def flag() -> bool:
+        """Arc flags are single digits and are often packed together, as in ``a2 2 0 010-3``."""
+        nonlocal pos
+        skip()
+        pos += 1
+        return d[pos - 1] == "1"
+
+    while True:
+        skip()
+        if pos >= len(d):
+            break
+        if d[pos].isalpha():
+            cmd = d[pos]
+            pos += 1
+            if cmd in "Zz":
+                if current:
+                    out.append((current, True))
+                current = [(sx, sy)]  # a later lineto starts where the subpath began
+                x, y = sx, sy
+                last_ctrl = None
+                continue
+        rel = cmd.islower()
+        c = cmd.upper()
+        if c == "M":
+            nx, ny = num(), num()
+            x, y = (x + nx, y + ny) if rel else (nx, ny)
+            if len(current) > 1:
+                out.append((current, False))
+            current = [(x, y)]
+            sx, sy = x, y
+            cmd = "l" if rel else "L"  # extra pairs after a moveto are linetos
+            last_ctrl = None
+        elif c == "L":
+            nx, ny = num(), num()
+            x, y = (x + nx, y + ny) if rel else (nx, ny)
+            current.append((x, y))
+            last_ctrl = None
+        elif c == "H":
+            nx = num()
+            x = x + nx if rel else nx
+            current.append((x, y))
+            last_ctrl = None
+        elif c == "V":
+            ny = num()
+            y = y + ny if rel else ny
+            current.append((x, y))
+            last_ctrl = None
+        elif c in "CS":
+            if c == "C":
+                c1 = (num(), num())
+                if rel:
+                    c1 = (x + c1[0], y + c1[1])
+            else:
+                c1 = (2 * x - last_ctrl[0], 2 * y - last_ctrl[1]) if last_ctrl else (x, y)
+            c2, end = (num(), num()), (num(), num())
+            if rel:
+                c2, end = (x + c2[0], y + c2[1]), (x + end[0], y + end[1])
+            current += _cubic((x, y), c1, c2, end)
+            last_ctrl = c2
+            x, y = end
+        elif c == "A":
+            rx, ry, phi = num(), num(), num()
+            large, sweep = flag(), flag()
+            nx, ny = num(), num()
+            if rel:
+                nx, ny = x + nx, y + ny
+            current += _arc(x, y, rx, ry, phi, bool(large), bool(sweep), nx, ny)
+            x, y = nx, ny
+            last_ctrl = None
+        else:
+            raise ValueError(f"unsupported path command {cmd!r}")
+    if len(current) > 1:
+        out.append((current, False))
+    return out
+
+
+def _shapes(body: str) -> list[tuple[list[tuple[float, float]], bool]]:
+    shapes: list[tuple[list[tuple[float, float]], bool]] = []
+    for tag, attrs in re.findall(r"<(\w+)([^>]*)/>", body):
+        a = {k: v for k, v in _ATTR.findall(attrs)}
+        if tag == "path":
+            shapes += path_polylines(a["d"])
+        elif tag == "circle":
+            cx, cy, r = float(a["cx"]), float(a["cy"]), float(a["r"])
+            pts = [(cx + r * math.cos(t / 32 * math.tau), cy + r * math.sin(t / 32 * math.tau))
+                   for t in range(32)]
+            shapes.append((pts, True))
+        elif tag == "rect":
+            x, y = float(a["x"]), float(a["y"])
+            w, h, rx = float(a["width"]), float(a["height"]), float(a.get("rx", 0))
+            shapes.append((rounded_rect_points(x, y, w, h, rx), True))
+    return shapes
+
+
+def rounded_rect_points(x: float, y: float, w: float, h: float, r: float, steps: int = 6):  # noqa: ANN201
+    r = max(0.0, min(r, w / 2, h / 2))
+    if r == 0:
+        return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+    pts = []
+    for cx, cy, start in ((x + w - r, y + r, -90), (x + w - r, y + h - r, 0),
+                          (x + r, y + h - r, 90), (x + r, y + r, 180)):
+        for i in range(steps + 1):
+            t = math.radians(start + 90 * i / steps)
+            pts.append((cx + r * math.cos(t), cy + r * math.sin(t)))
+    return pts
+
+
+@lru_cache(maxsize=512)
+def image(name: str, color: str = "#1E1E1E", size: int = ICON_SIZE) -> Image.Image:
+    """The icon as an RGBA Pillow image, ``size`` pixels square."""
+    big = size * SUPERSAMPLE
+    k = big / 24
+    canvas = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    width = max(1, round(STROKE * k))
+    r = width / 2
+    for points, closed in _shapes(_PATHS[name]):
+        pts = [(px * k, py * k) for px, py in points]
+        if closed and pts:
+            pts.append(pts[0])
+        if len(pts) > 1:
+            draw.line(pts, fill=color, width=width, joint="curve")
+        for px, py in (pts[0], pts[-1]) if pts else ():
+            draw.ellipse((px - r, py - r, px + r, py + r), fill=color)
+    return canvas.resize((size, size), Image.LANCZOS)
+
+
+def photo(name: str, color: str = "#1E1E1E", size: int = ICON_SIZE, master: Any = None) -> Any:
+    """A Tk PhotoImage, cached on its Tk root. Tk images belong to one interpreter, so each root
+    (each window session, or each test) gets its own cache that lives exactly as long as it."""
+    import tkinter
+
+    from PIL import ImageTk
+
+    root = master._root() if master is not None else tkinter._get_default_root()
+    cache = root.__dict__.setdefault("_lanvas_icons", {})
+    key = (name, color, size)
+    if key not in cache:
+        cache[key] = ImageTk.PhotoImage(image(name, color, size), master=root)
+    return cache[key]
+
+
+def icon(name: str, color: str = "#1E1E1E", checked_color: str = "#FFFFFF",
+         master: Any = None) -> tuple[Any, Any]:
+    """(normal, selected) images, as a checkable tool button needs both."""
+    return photo(name, color, master=master), photo(name, checked_color, master=master)
+
+
+__all__ = ["ICON_SIZE", "icon", "image", "photo", "svg"]

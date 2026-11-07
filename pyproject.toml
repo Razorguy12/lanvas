@@ -26,5 +26,5 @@ markers = [
     "discovery: UDP discovery (DS)",
     "persist: durable writes, save, recovery (SV)",
     "export: export formats (EX), offscreen",
-    "ui: Qt widgets, offscreen",
+    "ui: Tk widgets (needs a display, or xvfb-run)",
 ]

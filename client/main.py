@@ -7,10 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from PyQt6.QtWidgets import QApplication
-
-from client import paths, theme
-from client.app import AppWindow
+from client import paths
 from common.protocol import UDP_PORT
 
 
@@ -26,25 +23,23 @@ def main(argv: list[str] | None = None) -> int:
         metavar=("HOST", "PORT", "OUTDIR"),
         help="self-test a packaged build against a running server, then exit",
     )
-    args, qt_args = parser.parse_known_args(argv)
+    args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
     if args.profile:
         paths.set_profile(args.profile)
-    app = QApplication([sys.argv[0], *qt_args])
-    app.setApplicationName("LANvas")
-    theme.load_fonts()
-    theme.apply(app, dark=args.dark)
+    from client.app import AppWindow
+
     if args.smoke:
         from client import smoke
 
         host, port, out_dir = args.smoke
-        return smoke.run(app, host, int(port), Path(out_dir), args.udp_port)
-    window = AppWindow(args.udp_port)
-    window.show()
-    return app.exec()
+        return smoke.run(host, int(port), Path(out_dir), args.udp_port)
+    window = AppWindow(args.udp_port, dark=args.dark)
+    window.mainloop()
+    return 0
 
 
 if __name__ == "__main__":

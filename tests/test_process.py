@@ -110,7 +110,7 @@ def test_XP_03_built_executables_full_flow(tmp_path):
         result = subprocess.run(
             [str(client_exe), "--smoke", "127.0.0.1", str(tcp), str(tmp_path / "out"), "--udp-port", str(udp)],
             cwd=tmp_path,
-            env={**env, "QT_QPA_PLATFORM": "offscreen", "LANVAS_HOME": str(tmp_path / "home")},
+            env={**env, "LANVAS_HOME": str(tmp_path / "home")},
             capture_output=True,
             text=True,
             timeout=90,

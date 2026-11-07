@@ -2,26 +2,24 @@
 
 from __future__ import annotations
 
+import tkinter as tk
 from typing import Any
-
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
-from PyQt6.QtWidgets import (
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QScrollArea,
-    QSizePolicy,
-    QToolButton,
-    QVBoxLayout,
-    QWidget,
-)
 
 from client import icons, theme
 from client.boardlist import BoardEntry
-from client.widgets import Spinner, section_label
+from client.widgets import (
+    Button,
+    Frame,
+    Label,
+    LineEdit,
+    ScrollFrame,
+    Signal,
+    Spinner,
+    ToolButton,
+    after_ms,
+    blend,
+    section_label,
+)
 
 HINT_AFTER_MS = 10_000
 HINT_TEXT = (
@@ -30,80 +28,64 @@ HINT_TEXT = (
 )
 
 
-class LiveDot(QWidget):
+class LiveDot(tk.Canvas):
     """A pulsing dot, proof that listening is active rather than the app being stuck."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.setFixedSize(10, 10)
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, width=10, height=10, highlightthickness=0,
+                         background=theme.current().bg_app)
         self.alpha = 255
         self.step = -12
-        timer = QTimer(self)
-        timer.timeout.connect(self._tick)
-        timer.start(60)
+        self.dot = self.create_oval(1, 1, 9, 9, outline="")
+        self._tick()
 
     def _tick(self) -> None:
         self.alpha += self.step
         if self.alpha <= 90 or self.alpha >= 255:
             self.step = -self.step
-        self.update()
-
-    def paintEvent(self, event: Any) -> None:  # noqa: N802 (Qt override)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        color = QColor(theme.current().success)
-        color.setAlpha(max(90, min(255, self.alpha)))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(color)
-        painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
+        t = theme.current()
+        a = max(90, min(255, self.alpha)) / 255
+        self.itemconfigure(self.dot, fill=blend(t.success, t.bg_app, a))
+        after_ms(self, 60, self._tick)
 
 
-class BoardRow(QFrame):
-    join = pyqtSignal(object, str)
-
-    def __init__(self, entry: BoardEntry) -> None:
-        super().__init__()
+class BoardRow(Frame):
+    def __init__(self, entry: BoardEntry, master: tk.Misc | None = None) -> None:
+        super().__init__(master if master is not None else tk._default_root, "card",
+                         padding=(12, 8, 8, 8))
         self.entry = entry
-        self.setObjectName("card")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 8, 8)
-        row = QHBoxLayout()
-        name = QLabel(entry.name if entry.compatible else f"{entry.name} (needs update)")
-        name.setObjectName("title")
-        name.setTextFormat(Qt.TextFormat.PlainText)
-        name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        row.addWidget(name, 2)
+        self.join = Signal()
+        t = theme.current()
+        row = tk.Frame(self, background=t.bg_panel)
+        row.pack(fill="x")
+        name = Label(row, entry.name if entry.compatible else f"{entry.name} (needs update)",
+                     "title")
+        name.pack(side="left", fill="x", expand=True)
         host = entry.server_name + (f" · {entry.host_name}" if entry.host_name else "")
         if not entry.compatible:
             host = f"v{entry.protocol_version} server"
-        where = QLabel(host)
-        where.setObjectName("muted")
-        where.setTextFormat(Qt.TextFormat.PlainText)
-        row.addWidget(where, 2)
+        where = Label(row, host, "panelmuted")
+        where.pack(side="left", fill="x", expand=True)
         count = "—" if entry.member_count is None else _people(entry.member_count)
-        people = QLabel(count)
-        people.setObjectName("muted")
-        row.addWidget(people)
+        Label(row, count, "panelmuted").pack(side="left", padx=6)
+        self.widgets: list[Any] = [row, name, where]
         if entry.compatible:
-            lock = QLabel()
-            lock.setPixmap(icons.pixmap("lock", theme.current().text_muted, 28).scaled(14, 14))
+            lock = Label(row, "", "panel", image=icons.photo("lock", t.text_muted, 14, row))
             lock.setToolTip("Needs owner approval")
-            row.addWidget(lock)
-            approval = QLabel("approval")
-            approval.setObjectName("muted")
-            row.addWidget(approval)
-            self.join_button = QPushButton("Join")
-            self.join_button.setObjectName("primary")
+            lock.pack(side="left")
+            Label(row, "approval", "panelmuted").pack(side="left", padx=(2, 8))
+            self.join_button = Button(row, "Join", "primary")
             self.join_button.clicked.connect(self._clicked)
-            row.addWidget(self.join_button)
+            self.join_button.pack(side="left")
         else:
-            self.setEnabled(False)  # shown so that people can tell why it isn't joinable
-        layout.addLayout(row)
-        self.code = QLineEdit()
-        self.code.setPlaceholderText("This room needs its code")
-        self.code.setVisible(False)
+            name.configure(foreground=t.text_muted)
+            self.state(["disabled"])  # shown so that people can tell why it isn't joinable
+        self.code = LineEdit(self, placeholder="This room needs its code")
         self.code.returnPressed.connect(self._clicked)
-        layout.addWidget(self.code)
+        self.code.pack(fill="x", pady=(6, 0))
+        self.code.setVisible(False)
+        for widget in (self, row, name, where):
+            widget.bind("<Double-Button-1>", self._double, add="+")
 
     def _clicked(self) -> None:
         if self.entry.require_code and not self.code.text().strip():
@@ -112,7 +94,7 @@ class BoardRow(QFrame):
             return
         self.join.emit(self.entry, self.code.text().strip())
 
-    def mouseDoubleClickEvent(self, event: Any) -> None:  # noqa: N802
+    def _double(self, _event: Any = None) -> None:
         if self.entry.compatible:
             self._clicked()
 
@@ -121,120 +103,84 @@ def _people(count: int) -> str:
     return f"{count} {'person' if count == 1 else 'people'}"
 
 
-class LauncherPage(QWidget):
-    join_board = pyqtSignal(object, str)
-    join_by_address = pyqtSignal()
-    create_room = pyqtSignal()
-    open_file = pyqtSignal()
-    refresh = pyqtSignal()
-    recover = pyqtSignal()
-    name_changed = pyqtSignal(str)
-
-    def __init__(self, username: str) -> None:
-        super().__init__()
-        self.setObjectName("page")
+class LauncherPage(Frame):
+    def __init__(self, master: tk.Misc, username: str) -> None:
+        super().__init__(master, "page")
+        self.join_board = Signal()
+        self.join_by_address = Signal()
+        self.create_room = Signal()
+        self.open_file = Signal()
+        self.refresh = Signal()
+        self.recover = Signal()
+        self.name_changed = Signal()
         self.rows: dict[tuple[str, str], BoardRow] = {}
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-        self.banner = QWidget()
-        self.banner.setObjectName("banner")
-        banner_row = QHBoxLayout(self.banner)
-        banner_row.setContentsMargins(16, 6, 16, 6)
-        self.banner_text = QLabel("LANvas didn't close properly last time.")
-        banner_row.addWidget(self.banner_text, 1)
-        recover = QPushButton("Recover…")
+        t = theme.current()
+
+        self.banner = Frame(self, "banner", padding=(16, 6))
+        self.banner.pack(fill="x")
+        self.banner_text = Label(self.banner, "LANvas didn't close properly last time.", "banner")
+        self.banner_text.pack(side="left", fill="x", expand=True)
+        recover = Button(self.banner, "Recover…", "banner")
         recover.clicked.connect(self.recover.emit)
-        banner_row.addWidget(recover)
+        recover.pack(side="right")
         self.banner.setVisible(False)
-        outer.addWidget(self.banner)
 
-        center = QHBoxLayout()
-        outer.addLayout(center, 1)
-        center.addStretch(1)
-        column = QVBoxLayout()
-        column.setContentsMargins(24, 24, 24, 24)
-        column.setSpacing(12)
-        center.addLayout(column, 6)
-        center.addStretch(1)
+        center = Frame(self, "page")
+        center.pack(fill="both", expand=True)
+        center.columnconfigure(0, weight=1)
+        center.columnconfigure(1, weight=6)
+        center.columnconfigure(2, weight=1)
+        center.rowconfigure(0, weight=1)
+        column = Frame(center, "page", padding=24)
+        column.grid(row=0, column=1, sticky="nsew")
+        column.columnconfigure(0, weight=1)
 
-        title = QLabel("LANvas")
-        title.setObjectName("hero")
-        column.addWidget(title)
-        row = QHBoxLayout()
-        label = QLabel("Your name")
-        label.setObjectName("muted")
-        row.addWidget(label)
-        self.name = QLineEdit(username)
-        self.name.setMaxLength(64)
+        Label(column, "LANvas", "hero").grid(row=0, column=0, sticky="w", pady=(0, 12))
+        row = Frame(column, "page")
+        row.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        Label(row, "Your name", "muted").pack(side="left", padx=(0, 8))
+        self.name = LineEdit(row, username, max_length=64)
         self.name.textChanged.connect(self.name_changed.emit)
-        row.addWidget(self.name, 1)
-        column.addLayout(row)
+        self.name.pack(side="left", fill="x", expand=True)
 
-        heading = QHBoxLayout()
-        heading.addWidget(section_label("Boards on this network"))
-        heading.addStretch(1)
-        heading.addWidget(LiveDot())
-        live = QLabel("live")
-        live.setObjectName("muted")
-        heading.addWidget(live)
-        refresh = QToolButton()
-        refresh.setIcon(icons.icon("refresh", theme.current().text_primary))
-        refresh.setToolTip("Search again now")
+        heading = Frame(column, "page")
+        heading.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        section_label(heading, "Boards on this network", on_panel=False).pack(side="left")
+        refresh = ToolButton(heading, "refresh", tooltip="Search again now")
+        refresh.configure(style="Page.Tool.TCheckbutton")
         refresh.clicked.connect(self.refresh.emit)
-        heading.addWidget(refresh)
-        column.addLayout(heading)
+        refresh.pack(side="right")
+        Label(heading, "live", "muted").pack(side="right", padx=(4, 8))
+        LiveDot(heading).pack(side="right")
 
-        self.area = QScrollArea()
-        self.area.setWidgetResizable(True)
-        self.area.setFrameShape(QFrame.Shape.NoFrame)
-        body = QWidget()
-        body.setObjectName("page")
-        self.list_layout = QVBoxLayout(body)
-        self.list_layout.setContentsMargins(0, 0, 0, 0)
-        self.list_layout.setSpacing(6)
-        self.list_layout.addStretch(1)
-        self.area.setWidget(body)
-        column.addWidget(self.area, 1)
+        self.area = ScrollFrame(column)
+        self.area.grid(row=3, column=0, sticky="nsew")
+        column.rowconfigure(3, weight=1)
+        self.list_body = self.area.body
 
-        self.empty = QWidget()
-        empty_layout = QVBoxLayout(self.empty)
-        looking = QHBoxLayout()
-        looking.addStretch(1)
-        looking.addWidget(Spinner())
-        text = QLabel("Looking for boards on your network…")
-        text.setObjectName("muted")
-        looking.addWidget(text)
-        looking.addStretch(1)
-        empty_layout.addLayout(looking)
-        self.hints = QLabel(HINT_TEXT)
-        self.hints.setObjectName("muted")
-        self.hints.setWordWrap(True)
-        self.hints.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty = Frame(column, "page", padding=(0, 12))
+        self.empty.grid(row=4, column=0, sticky="ew")
+        looking = Frame(self.empty, "page")
+        looking.pack()
+        Spinner(looking, background=t.bg_app).pack(side="left", padx=(0, 8))
+        Label(looking, "Looking for boards on your network…", "muted").pack(side="left")
+        self.hints = Label(self.empty, HINT_TEXT, "muted", justify="center", wraplength=520)
+        self.hints.pack(pady=(8, 0))
         self.hints.setVisible(False)
-        empty_layout.addWidget(self.hints)
-        column.addWidget(self.empty)
-        QTimer.singleShot(HINT_AFTER_MS, lambda: self.hints.setVisible(True))
+        after_ms(self, HINT_AFTER_MS, lambda: self.hints.setVisible(True))
 
-        actions = QHBoxLayout()
-        by_address = QPushButton("Join by address…")
-        by_address.clicked.connect(self.join_by_address.emit)
-        actions.addWidget(by_address)
-        create = QPushButton("Create room…")
-        create.clicked.connect(self.create_room.emit)
-        actions.addWidget(create)
-        open_file = QPushButton("Open .lanvas…")
-        open_file.clicked.connect(self.open_file.emit)
-        actions.addWidget(open_file)
-        actions.addStretch(1)
-        column.addLayout(actions)
+        actions = Frame(column, "page")
+        actions.grid(row=5, column=0, sticky="w", pady=(12, 0))
+        for text, signal in (("Join by address…", self.join_by_address),
+                             ("Create room…", self.create_room),
+                             ("Open .lanvas…", self.open_file)):
+            button = Button(actions, text)
+            button.clicked.connect(signal.emit)
+            button.pack(side="left", padx=(0, 6))
 
-        self.message = QLabel()
-        self.message.setWordWrap(True)
-        self.message.setTextFormat(Qt.TextFormat.PlainText)
-        self.message.setStyleSheet(f"color:{theme.current().danger};")
+        self.message = Label(column, "", "danger", wraplength=640, justify="left")
+        self.message.grid(row=6, column=0, sticky="w", pady=(8, 0))
         self.message.setVisible(False)
-        column.addWidget(self.message)
 
     def show_message(self, text: str) -> None:
         self.message.setText(text)
@@ -252,18 +198,19 @@ class LauncherPage(QWidget):
         """Diff-based: unchanged rows stay in place, so they never flicker or lose a typed code."""
         wanted = {(b.server_id, b.room_id): b for b in boards}
         for key in [k for k in self.rows if k not in wanted]:
-            row = self.rows.pop(key)
-            self.list_layout.removeWidget(row)
-            row.deleteLater()
-        for index, board in enumerate(boards):
+            self.rows.pop(key).destroy()
+        for board in boards:
             key = (board.server_id, board.room_id)
             row = self.rows.get(key)
             if row is None or row.entry != board:
                 if row is not None:
-                    self.list_layout.removeWidget(row)
-                    row.deleteLater()
-                row = BoardRow(board)
+                    row.destroy()
+                row = BoardRow(board, self.list_body)
                 row.join.connect(self.join_board.emit)
                 self.rows[key] = row
-            self.list_layout.insertWidget(index, row)
+        for board in boards:
+            row = self.rows[(board.server_id, board.room_id)]
+            row.pack_forget()
+            row.pack(fill="x", pady=(0, 6))
         self.empty.setVisible(not boards)
+

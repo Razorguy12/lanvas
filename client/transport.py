@@ -1,7 +1,8 @@
-"""Client networking without Qt: socket thread, handshake, heartbeat, reconnect, inspector, chaos.
+"""Client networking without UI code: socket thread, handshake, heartbeat, reconnect, inspector,
+chaos.
 
-``client/net.py`` wraps this in a QObject that re-emits events as signals. Keeping it Qt-free lets
-the same code run in headless tests against a real server.
+``client/net.py`` wraps this and hands its events to the Tk thread. Keeping it UI-free lets the
+same code run in headless tests against a real server.
 
 Threading: one background thread owns the socket. :meth:`NetCore.send` may be called from any
 thread;

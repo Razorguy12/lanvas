@@ -2,23 +2,20 @@
 
 from __future__ import annotations
 
+import tkinter as tk
 from collections.abc import Callable
 from typing import Any
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
-    QComboBox,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QPushButton,
-    QScrollArea,
-    QVBoxLayout,
-    QWidget,
+from client import theme
+from client.widgets import (
+    Avatar,
+    Button,
+    ComboBox,
+    Label,
+    ScrollFrame,
+    ask_yes_no,
+    section_label,
 )
-
-from client.widgets import Avatar, section_label
 from common.identity import short_fingerprint
 
 
@@ -28,84 +25,84 @@ def state_text(member: dict[str, Any]) -> str:
     return "online" if member.get("online") else "offline"
 
 
-class PeoplePopover(QFrame):
-    def __init__(self, session: Any, on_message: Callable[[str], None]) -> None:
-        super().__init__(None, Qt.WindowType.Popup)
+class PeoplePopover(tk.Toplevel):
+    """A borderless popup that closes when it loses focus, like a Qt.Popup window."""
+
+    def __init__(self, master: tk.Misc, session: Any, on_message: Callable[[str], None]) -> None:
+        super().__init__(master)
+        t = theme.current()
         self.session = session
         self.on_message = on_message
-        self.setObjectName("card")
-        self.setMinimumWidth(360)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.addWidget(section_label("People in this room"))
-        area = QScrollArea()
-        area.setWidgetResizable(True)
-        area.setFrameShape(QFrame.Shape.NoFrame)
-        area.setMaximumHeight(360)
-        body = QWidget()
-        self.rows = QVBoxLayout(body)
-        self.rows.setContentsMargins(0, 0, 0, 0)
-        area.setWidget(body)
-        root.addWidget(area)
+        self.wm_overrideredirect(True)
+        self.configure(background=t.border)
+        card = tk.Frame(self, background=t.bg_panel, padx=12, pady=12)
+        card.pack(padx=1, pady=1, fill="both", expand=True)
+        section_label(card, "People in this room").pack(anchor="w", pady=(0, 6))
+        area = ScrollFrame(card, background=t.bg_panel, max_height=360)
+        area.pack(fill="both", expand=True)
         members = sorted(
             session.members.values(),
             key=lambda m: (
-                not m.get("online"),
-                m.get("role") != "owner",
-                m.get("name", "").lower(),
+                not m.get("online"), m.get("role") != "owner", m.get("name", "").lower()
             ),
         )
         for member in members:
-            self.rows.addWidget(self._row(member))
-        self.rows.addStretch(1)
+            self._row(area.body, member).pack(fill="x", pady=2)
+        self.bind("<Escape>", lambda e: self.close())
+        self.bind("<FocusOut>", self._focus_out)
+        self.minsize(360, 0)
 
-    def _row(self, member: dict[str, Any]) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 2, 0, 2)
+    def _focus_out(self, _event: Any) -> None:
+        # Combobox dropdowns take focus briefly; only close once focus left the popover for good.
+        self.after(150, lambda: self.winfo_exists() and self.focus_get() is None and self.close())
+
+    def close(self) -> None:
+        if self.winfo_exists():
+            self.destroy()
+
+    def _row(self, master: tk.Misc, member: dict[str, Any]) -> tk.Frame:
+        t = theme.current()
+        row = tk.Frame(master, background=t.bg_panel)
         fingerprint = member["fp"]
-        layout.addWidget(Avatar(member.get("name", "?"), fingerprint, member.get("away", False)))
+        Avatar(row, member.get("name", "?"), fingerprint, member.get("away", False)).pack(
+            side="left", padx=(0, 8))
         you = " (you)" if fingerprint == self.session.fp else ""
         muted = " · muted" if member.get("muted") else ""
         name = member.get("name", "?")
-        label = QLabel(f"{name}{you}\n{member.get('role', '')} · {state_text(member)}{muted}")
-        label.setTextFormat(Qt.TextFormat.PlainText)
+        label = Label(row, f"{name}{you}\n{member.get('role', '')} · {state_text(member)}{muted}",
+                      "panel", justify="left")
         label.setToolTip(short_fingerprint(fingerprint))
-        layout.addWidget(label, 1)
+        label.pack(side="left", fill="x", expand=True)
         if fingerprint != self.session.fp:
-            message = QPushButton("Message")
+            message = Button(row, "Message")
             message.clicked.connect(lambda: (self.close(), self.on_message(fingerprint)))
-            layout.addWidget(message)
+            message.pack(side="left", padx=2)
         if self.session.role == "owner" and member.get("role") != "owner":
-            self._owner_controls(layout, member)
+            self._owner_controls(row, member)
         return row
 
-    def _owner_controls(self, layout: QHBoxLayout, member: dict[str, Any]) -> None:
+    def _owner_controls(self, row: tk.Frame, member: dict[str, Any]) -> None:
         fingerprint = member["fp"]
-        role = QComboBox()
+        role = ComboBox(row, width=7)
         role.addItems(["editor", "viewer"])
         role.setCurrentText(member.get("role", "viewer"))
         role.activated.connect(
-            lambda: self.session.send_admin("set_role", fp=fingerprint, role=role.currentText())
+            lambda *_: self.session.send_admin("set_role", fp=fingerprint, role=role.currentText())
         )
-        layout.addWidget(role)
-        mute = QPushButton("Unmute" if member.get("muted") else "Mute")
-        mute.clicked.connect(
-            lambda: (
-                self.session.send_admin("mute", fp=fingerprint, muted=not member.get("muted")),
-                self.close(),
-            )
-        )
-        layout.addWidget(mute)
-        kick = QPushButton("Kick")
-        kick.setObjectName("danger")
+        role.pack(side="left", padx=2)
+        mute = Button(row, "Unmute" if member.get("muted") else "Mute")
+        mute.clicked.connect(lambda: (
+            self.session.send_admin("mute", fp=fingerprint, muted=not member.get("muted")),
+            self.close(),
+        ))
+        mute.pack(side="left", padx=2)
+        kick = Button(row, "Kick", "danger")
         kick.clicked.connect(lambda: self._kick(fingerprint, member.get("name", "this person")))
-        layout.addWidget(kick)
+        kick.pack(side="left", padx=2)
 
     def _kick(self, fingerprint: str, name: str) -> None:
+        master = self.master
         self.close()
-        answer = QMessageBox.question(
-            None, "Kick", f"Remove {name} from this room? They would have to ask to join again."
-        )
-        if answer == QMessageBox.StandardButton.Yes:
+        if ask_yes_no(master, "Kick",
+                      f"Remove {name} from this room? They would have to ask to join again."):
             self.session.send_admin("kick", fp=fingerprint)

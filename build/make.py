@@ -13,16 +13,10 @@ ROOT = Path(__file__).resolve().parent.parent
 FONTS = ROOT / "client" / "assets" / "fonts"
 SEP = ";" if platform.system() == "Windows" else ":"
 
-# Pulled in only by dynamic import or by Qt plugins, so PyInstaller cannot see them by itself.
-CLIENT_HIDDEN = ("PyQt6.QtSvg", "PyQt6.QtPrintSupport")
-# Trimmed because a Qt build is large and these parts are never used.
-EXCLUDES = (
-    "PyQt6.QtWebEngineCore",
-    "PyQt6.QtWebEngineWidgets",
-    "PyQt6.QtQml",
-    "PyQt6.QtQuick",
-    "tkinter",
-)
+# Pulled in only by dynamic import, so PyInstaller cannot see them by itself.
+CLIENT_HIDDEN = ("PIL.ImageTk", "PIL._tkinter_finder")
+# Trimmed because these parts are never used by either program.
+EXCLUDES = ("PyQt5", "PyQt6", "PySide6", "numpy")
 
 
 def build(name: str, entry: str, gui: bool) -> Path:
@@ -53,8 +47,9 @@ def build(name: str, entry: str, gui: bool) -> Path:
         for module in CLIENT_HIDDEN:
             command += ["--hidden-import", module]
     else:
-        # The server must never ship Qt. The rule that server/ imports no Qt is enforced here too.
-        command += ["--exclude-module", "PyQt6"]
+        # The server never ships a UI toolkit. The rule that server/ imports no UI code is
+        # enforced here too.
+        command += ["--exclude-module", "tkinter", "--exclude-module", "PIL"]
     command.append(str(ROOT / entry))
     subprocess.run(command, cwd=ROOT, check=True)
     return ROOT / "dist" / name

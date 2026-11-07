@@ -1,7 +1,7 @@
 # Design.md
 
-> UI/UX design system for LANvas (PyQt6). Goal: **feels like Figma**: calm, dense, tool-focused, with the canvas as the hero.
-> Implement tokens in `client/theme.py`; style with Qt stylesheets (QSS) and custom-painted widgets where needed.
+> UI/UX design system for LANvas (tkinter). Goal: **feels like Figma**: calm, dense, tool-focused, with the canvas as the hero.
+> Implement tokens in `client/theme.py`; style with ttk styles and custom-painted widgets (Tk canvases, Pillow images) where needed.
 
 ---
 
@@ -68,7 +68,7 @@ Each user color is used for their cursor, name tag, selection outline, and chat 
 - Popovers: 1 px border plus soft shadow (`0 4px 16px rgba(0,0,0,.18)`).
 
 ### 3.4 Iconography
-Monochrome line icons (Lucide or Phosphor SVG set, bundled), 16 px, 1.5 px stroke. Use `QSvgRenderer`. Lock icon marks private conversations; shield-check marks signed files.
+Monochrome line icons (Lucide or Phosphor SVG set, bundled), 16 px, 1.5 px stroke. Rasterized from inline SVG path data with Pillow (`client/icons.py`). Lock icon marks private conversations; shield-check marks signed files.
 
 ## 4. Tools and shortcuts
 
@@ -258,15 +258,15 @@ List of checkpoints (time, author color, label, hash short code); "Restore this 
 
 - Minimum contrast 4.5:1 for text; focus ring (2 px accent) on all controls.
 - Do not rely on color alone: role badges have text, user cursors have name tags, private conversations have a lock icon and the words "Private", save state has text.
-- Scalable UI (respect OS DPI via Qt high-DPI), keyboard navigation of panels, launcher list and dialogs.
+- Scalable UI (respect OS DPI via Tk scaling), keyboard navigation of panels, launcher list and dialogs.
 - Animations: 120–160 ms ease-out for popovers, toasts, and launcher rows; none on canvas manipulation.
 
-## 12. Implementation notes (PyQt6)
+## 12. Implementation notes (tkinter)
 
-- Canvas: `QGraphicsView` (+ `setRenderHint(Antialiasing)`, `SmoothPixmapTransform`) with `QGraphicsScene`; custom `QGraphicsItem` subclasses per object type; a `SelectionOverlay` item for handles.
+- Canvas: `CanvasView` (a Tk canvas) over a `BoardScene` of `BoardItem`s. The document is painted by the raster painter into one image (1x while panning or dragging, 2x supersampled once idle); selection handles, guides, previews and remote cursors are Tk canvas items on top.
 - Remote cursors and selection overlays: a separate layer item, updated from signals, never part of the document, and **hidden during export**.
 - Eraser hit-testing: `scene.items(path)` against stroke shapes with a small tolerance.
-- Export: one renderer shared by all formats, painting each scene item directly in z-order into `QImage` (PNG/JPEG), `QSvgGenerator` (SVG), or `QPdfWriter` (PDF, one `newPage()` per frame). It is a generator that yields every 50 items, so large exports stay responsive and report progress. File writing runs on the IO worker. Overlays live in `drawForeground`, so they cannot reach an export.
+- Export: one renderer shared by all formats, painting each scene item directly in z-order through one painter API into a Pillow image (PNG/JPEG), the SVG writer, or the PDF writer (one page per frame). It is a generator that yields every 50 items, so large exports stay responsive and report progress. File writing runs on the IO worker. Overlays are Tk canvas items, never scene items, so they cannot reach an export.
 - Chat: a `QTextBrowser` rendering escaped HTML per channel; lazy history loading on scroll-top. Chosen over a `QListView` delegate for grouping and right alignment at far less code; every piece of user text is `html.escape`d first.
 - Launcher board list: `QAbstractListModel` fed by the `DiscoveryWorker` signal; diff-based updates so rows animate instead of flickering.
 - Dark/light: one `Theme` dataclass; apply via `QPalette` plus QSS; switch at runtime.
@@ -300,7 +300,7 @@ List of checkpoints (time, author color, label, hash short code); "Restore this 
 | Open file | Open a signed, a modified, and a password-protected `.lanvas` | correct trust header / password prompt |
 
 ### 13.2 Visual regression (optional, if time allows)
-Render key states offscreen (`QT_QPA_PLATFORM=offscreen`, `QWidget.grab()`): launcher (empty and with boards), request-access screen, board with 3 remote cursors, chat with a DM open, properties panel, export dialog, recover dialog, inspector. Compare to stored baselines with a small pixel tolerance; update baselines only by owner approval.
+Render key states (on a display, or under `xvfb-run`): launcher (empty and with boards), request-access screen, board with 3 remote cursors, chat with a DM open, properties panel, export dialog, recover dialog, inspector. Compare to stored baselines with a small pixel tolerance; update baselines only by owner approval.
 
 ### 13.3 Usability test (30 minutes, 2 people outside the team)
 Tasks, timed, no help: (1) find a board on the network and get approved, (2) draw a shape and change its color, (3) move an object another user is moving, (4) send a room message and a private message, (5) save and export the board as PDF, (6) find your role. Success: at least 5 of 6 completed unaided. Log every hesitation as a UX bug (S3).

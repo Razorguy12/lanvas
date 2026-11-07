@@ -6,7 +6,7 @@
 
 ## 1. Mission
 
-Build a **Figma-style, LAN-only collaborative whiteboard** in Python with **raw sockets**, **PyQt6**, **creator-approved access control**, live board discovery, room and private chat with retained history, secure save with crash recovery, and export to PNG/JPEG/SVG/PDF/`.lanvas`.
+Build a **Figma-style, LAN-only collaborative whiteboard** in Python with **raw sockets**, **tkinter**, **creator-approved access control**, live board discovery, room and private chat with retained history, secure save with crash recovery, and export to PNG/JPEG/SVG/PDF/`.lanvas`.
 
 Work proceeds **phase by phase** (§11): finish a phase, test it, pass its gate, then start the next. Repeat until the whole project is complete and tested.
 
@@ -24,12 +24,12 @@ If code and docs disagree, **stop and flag it**; do not silently diverge. If you
 - **Networking uses `socket` and `selectors` only.** No `asyncio` streams, `socketserver`, `websockets`, Flask/FastAPI, Socket.IO, ZeroMQ, or similar.
 - **LAN only. No internet calls at runtime**: no CDNs, telemetry, online fonts, or update checks. Everything needed ships in the app, including fonts used in exports.
 - **Server is authoritative.** Never trust client claims about role, seq, ownership, chat recipient, or sender.
-- **No Qt imports** in `common/` or `server/`. `client/` must not import `server/`.
-- **Never block the Qt UI thread** with network or disk I/O (saves, journal writes, and export file writes go to the IO worker).
-- **Never touch Qt objects from the network, discovery, or IO threads.** Use signals/slots.
+- **No UI imports** (tkinter, Pillow) in `common/` or `server/`. `client/` must not import `server/`.
+- **Never block the Tk UI thread** with network or disk I/O (saves, journal writes, and export file writes go to the IO worker).
+- **Never touch Tk widgets from the network, discovery, or IO threads.** Hand work to the UI thread with `client.widgets.call_in_ui`.
 - **All persistent writes go through the durable writer** (`Architecture.md` §12.1): atomic replace, `fsync`, checksums. Never `open(path, "w")` on a data file directly.
 - **Python 3.11+, cross-platform** (Windows, Linux, macOS): use `pathlib`, no OS-specific paths or shell calls, handle line endings.
-- Pin dependencies in `requirements.txt` (`PyQt6`, `cryptography`, `pytest`, `pyinstaller`; optional `Pillow`). Export uses Qt built-ins (`QImage`, `QSvgGenerator`, `QPdfWriter`); encryption and signatures use `cryptography`. No new dependency is needed for the revision-2 features.
+- Pin dependencies in `requirements.txt` (`pillow`, `cryptography`, `pytest`, `pyinstaller`). The UI is tkinter from the standard library; rendering and export use Pillow plus the built-in SVG and PDF writers; encryption and signatures use `cryptography`. No new dependency is needed for the revision-2 features.
 
 ## 4. Setup and commands
 
@@ -232,11 +232,11 @@ Team size is 4 to 5, on a mix of Linux distros and Windows. Plan for both from P
 | UDP broadcast | Use `SO_BROADCAST`; enumerate interfaces, don't rely on `255.255.255.255` only | Same; also check multiple interfaces (Wi-Fi + Docker + VM bridges) |
 | UDP port sharing (server and client on one machine) | `SO_REUSEADDR` allows sharing | Set `SO_REUSEADDR` (and `SO_REUSEPORT` if available) **before** `bind` on both sockets |
 | Network change detection | Interface list polling every 5 s | Same |
-| Qt | Usually works out of the box | Qt 6.5+ on X11 may need `libxcb-cursor0`; on Wayland try `QT_QPA_PLATFORM=xcb` as fallback |
+| Tk | Included with the python.org installer | Install `python3-tk` (Debian/Ubuntu) or `python3-tkinter` (Fedora) when running from source |
 | Atomic save | `os.replace` fails if the target is open in another program (antivirus, viewer): retry a few times, then report "Save failed" | `os.replace` is atomic; also `fsync` the directory |
 | Paths/perms | Use `pathlib` and `QStandardPaths`; `0600` key and backup permissions are best-effort | Enforce `0600` on the identity key and local backups |
 | Line endings | Normalize to `\n` in saved files | n/a |
-| Packaging | Build `.exe` on Windows; include Qt SVG and PDF support (`QtSvg`, print support) | Build on the oldest distro you target (glibc compatibility), one binary per distro family if needed |
+| Packaging | Build `.exe` on Windows; include Tk and Pillow's Tk bridge (`PIL.ImageTk`) | Build on the oldest distro you target (glibc compatibility), one binary per distro family if needed |
 | Fonts | Bundle Inter; never rely on system fonts (exports too) | Same |
 | Time | Server stamps messages in UTC; client formats in local time | Same |
 

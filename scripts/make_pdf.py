@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Build the technical documentation PDF from the Markdown sources, offline, with Qt only."""
+"""Build the technical documentation PDF from the Markdown sources, offline, with Qt only.
+
+A maintainer tool, not part of the app: it needs PyQt6, which the app itself no longer uses
+(``pip install PyQt6`` to run it)."""
 
 from __future__ import annotations
 

@@ -3,133 +3,124 @@
 from __future__ import annotations
 
 import time
+import tkinter as tk
 from collections import deque
+from tkinter import ttk
 from typing import Any
 
-from PyQt6.QtCore import QPointF, Qt, QTimer
-from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
-from PyQt6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QHBoxLayout,
-    QLabel,
-    QPlainTextEdit,
-    QPushButton,
-    QSlider,
-    QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
-    QTabWidget,
-    QVBoxLayout,
-    QWidget,
-)
-
 from client import theme
+from client.widgets import (
+    Button,
+    CheckBox,
+    ComboBox,
+    Frame,
+    Label,
+    Slider,
+    TextView,
+    after_ms,
+)
 from common.protocol import MsgType
 
 MAX_ROWS = 300
 REFRESH_MS = 400
 SPARK_POINTS = 60
+COLUMNS = ("Time", "Dir", "Type", "Seq", "Size", "RTT")
 
 
-class Sparkline(QWidget):
-    def __init__(self) -> None:
-        super().__init__()
+class Sparkline(tk.Canvas):
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, width=160, height=28, highlightthickness=0,
+                         background=theme.current().bg_panel)
         self.values: deque[float] = deque(maxlen=SPARK_POINTS)
-        self.setFixedSize(160, 28)
 
     def add(self, value: float) -> None:
         self.values.append(value)
-        self.update()
-
-    def paintEvent(self, event: Any) -> None:  # noqa: N802 (Qt override)
+        self.delete("all")
         if len(self.values) < 2:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(theme.current().accent), 1.5))
         top = max(max(self.values), 1.0)
-        step = self.width() / (SPARK_POINTS - 1)
-        points = [
-            QPointF(i * step, self.height() - 2 - v / top * (self.height() - 4))
-            for i, v in enumerate(self.values)
-        ]
-        painter.drawPolyline(QPolygonF(points))
+        step = 160 / (SPARK_POINTS - 1)
+        coords: list[float] = []
+        for i, v in enumerate(self.values):
+            coords += [i * step, 28 - 2 - v / top * 24]
+        self.create_line(*coords, fill=theme.current().accent, width=1.5, smooth=True)
 
 
-class InspectorPanel(QWidget):
-    def __init__(self, get_core: Any, discovery: Any) -> None:
-        super().__init__()
+def _table(master: tk.Misc, columns: tuple[str, ...], widths: tuple[int, ...]) -> ttk.Treeview:
+    table = ttk.Treeview(master, columns=columns, show="headings", selectmode="browse")
+    for name, width in zip(columns, widths, strict=True):
+        table.heading(name, text=name, anchor="w")
+        table.column(name, width=width, stretch=name == columns[-1], anchor="w")
+    return table
+
+
+class InspectorPanel(Frame):
+    def __init__(self, master: tk.Misc, get_core: Any, discovery: Any) -> None:
+        super().__init__(master, "panel", padding=(8, 4, 8, 8))
         self.get_core = get_core
         self.discovery = discovery
         self.paused = False
         self._last_total = 0
         self._last_time = time.monotonic()
         self._records: list[Any] = []
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 4, 8, 8)
-        tabs = QTabWidget()
-        tabs.addTab(self._frames_tab(), "Frames")
-        tabs.addTab(self._discovery_tab(), "Discovery")
-        tabs.addTab(self._chaos_tab(), "Chaos (Debug)")
-        root.addWidget(tabs)
-        self.timer = QTimer(self)
-        self.timer.setInterval(REFRESH_MS)
-        self.timer.timeout.connect(self.refresh)
+        self._job: str | None = None
+        tabs = ttk.Notebook(self)
+        tabs.pack(fill="both", expand=True)
+        tabs.add(self._frames_tab(tabs), text="Frames")
+        tabs.add(self._discovery_tab(tabs), text="Discovery")
+        tabs.add(self._chaos_tab(tabs), text="Chaos (Debug)")
 
-    def showEvent(self, event: Any) -> None:  # noqa: N802
-        self.timer.start()  # nothing is polled while closed, so a closed panel costs nothing
+    def start(self) -> None:
+        """Nothing is polled while closed, so a closed panel costs nothing."""
+        if self._job is None:
+            self._tick()
 
-    def hideEvent(self, event: Any) -> None:  # noqa: N802
-        self.timer.stop()
+    def stop(self) -> None:
+        if self._job is not None:
+            self.after_cancel(self._job)
+            self._job = None
+
+    def _tick(self) -> None:
+        self.refresh()
+        self._job = after_ms(self, REFRESH_MS, self._tick)
 
     # ------------------------------------------------------------------ frames
-    def _frames_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 4, 0, 0)
-        controls = QHBoxLayout()
-        self.filter = QComboBox()
+    def _frames_tab(self, master: tk.Misc) -> Frame:
+        page = Frame(master, "panel", padding=(0, 4, 0, 0))
+        controls = Frame(page, "panel")
+        controls.pack(fill="x")
+        self.filter = ComboBox(controls, width=16)
         self.filter.addItem("All types", "")
         for member in MsgType:
             self.filter.addItem(member.name, member.name)
-        self.filter.currentIndexChanged.connect(self.refresh)
-        controls.addWidget(self.filter)
-        self.hide_noise = QCheckBox("Hide cursors and pings")
-        self.hide_noise.setChecked(True)
-        self.hide_noise.toggled.connect(self.refresh)
-        controls.addWidget(self.hide_noise)
-        pause = QPushButton("Pause")
-        pause.setCheckable(True)
-        pause.toggled.connect(self._toggle_pause)
-        controls.addWidget(pause)
-        self.rate = QLabel("0 msgs/s")
-        self.rate.setObjectName("muted")
-        controls.addWidget(self.rate)
-        self.spark = Sparkline()
-        controls.addWidget(self.spark)
-        controls.addStretch(1)
-        layout.addLayout(controls)
-        split = QSplitter(Qt.Orientation.Horizontal)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Time", "Dir", "Type", "Seq", "Size", "RTT"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.table.itemSelectionChanged.connect(self._show_details)
-        split.addWidget(self.table)
-        self.details = QPlainTextEdit()
-        self.details.setReadOnly(True)
-        self.details.setPlaceholderText("Select a frame to see its decoded JSON.")
-        split.addWidget(self.details)
-        split.setSizes([640, 360])
-        layout.addWidget(split)
+        self.filter.currentIndexChanged.connect(lambda *_: self.refresh())
+        self.filter.pack(side="left")
+        self.hide_noise = CheckBox(controls, "Hide cursors and pings", checked=True, panel=True)
+        self.hide_noise.toggled.connect(lambda *_: self.refresh())
+        self.hide_noise.pack(side="left", padx=8)
+        self.pause = Button(controls, "Pause")
+        self.pause.clicked.connect(self._toggle_pause)
+        self.pause.pack(side="left")
+        self.rate = Label(controls, "0 msgs/s", "panelmuted")
+        self.rate.pack(side="left", padx=8)
+        self.spark = Sparkline(controls)
+        self.spark.pack(side="left")
+        split = ttk.PanedWindow(page, orient="horizontal")
+        split.pack(fill="both", expand=True, pady=(4, 0))
+        self.table = _table(split, COLUMNS, (80, 36, 140, 60, 60, 80))
+        self.table.bind("<<TreeviewSelect>>", lambda e: self._show_details())
+        split.add(self.table, weight=2)
+        self.details = TextView(split, height=8)
+        self.details.set_plain("Select a frame to see its decoded JSON.")
+        split.add(self.details, weight=1)
         return page
 
-    def _toggle_pause(self, paused: bool) -> None:
-        self.paused = paused
+    def _toggle_pause(self) -> None:
+        self.paused = not self.paused
+        self.pause.setText("Resume" if self.paused else "Pause")
+
+    def rows(self) -> list[tuple[str, ...]]:
+        return [tuple(self.table.item(i, "values")) for i in self.table.get_children()]
 
     def refresh(self) -> None:
         core = self.get_core()
@@ -156,40 +147,30 @@ class InspectorPanel(QWidget):
         if len(rows) == len(self._records) and rows[-1:] == self._records[-1:]:
             return
         self._records = rows
-        self.table.blockSignals(True)
-        self.table.setUpdatesEnabled(False)
-        self.table.setRowCount(len(rows))
+        self.table.delete(*self.table.get_children())
         for index, record in enumerate(reversed(rows)):
             rtt = f"{record.rtt * 1000:.1f} ms" if record.rtt is not None else ""
-            cells = (
+            self.table.insert("", "end", iid=str(index), values=(
                 time.strftime("%H:%M:%S", time.localtime(record.time)),
                 "←" if record.direction == "in" else "→",
                 record.type_name,
                 "" if record.seq is None else str(record.seq),
                 str(record.size),
                 rtt,
-            )
-            for col, value in enumerate(cells):
-                self.table.setItem(index, col, QTableWidgetItem(value))
-        self.table.setUpdatesEnabled(True)
-        self.table.blockSignals(False)
+            ))
 
     def _show_details(self) -> None:
-        row = self.table.currentRow()
-        if 0 <= row < len(self._records):
-            self.details.setPlainText(self._records[len(self._records) - 1 - row].preview)
+        selected = self.table.selection()
+        if selected:
+            row = int(selected[0])
+            if 0 <= row < len(self._records):
+                self.details.set_plain(self._records[len(self._records) - 1 - row].preview)
 
     # ------------------------------------------------------------------ discovery
-    def _discovery_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 4, 0, 0)
-        self.discovery_table = QTableWidget(0, 3)
-        self.discovery_table.setHorizontalHeaderLabels(["Source IP", "Rooms", "Age"])
-        self.discovery_table.verticalHeader().setVisible(False)
-        self.discovery_table.horizontalHeader().setStretchLastSection(True)
-        self.discovery_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        layout.addWidget(self.discovery_table)
+    def _discovery_tab(self, master: tk.Misc) -> Frame:
+        page = Frame(master, "panel", padding=(0, 4, 0, 0))
+        self.discovery_table = _table(page, ("Source IP", "Rooms", "Age"), (140, 300, 80))
+        self.discovery_table.pack(fill="both", expand=True)
         return page
 
     def _refresh_discovery(self) -> None:
@@ -198,54 +179,40 @@ class InspectorPanel(QWidget):
         newest: dict[str, dict[str, Any]] = {}
         for entry in list(self.discovery.tracker.log):
             newest[entry["source"]] = entry
-        self.discovery_table.setRowCount(len(newest))
+        table = self.discovery_table
+        table.delete(*table.get_children())
         now = time.time()
-        for row, (source, entry) in enumerate(sorted(newest.items())):
+        for source, entry in sorted(newest.items()):
             names = ", ".join(r.get("name", "?") for r in entry["msg"]["rooms"])
-            cells = (source, names, f"{now - entry['time']:.1f} s")
-            for col, value in enumerate(cells):
-                self.discovery_table.setItem(row, col, QTableWidgetItem(value))
+            table.insert("", "end", values=(source, names, f"{now - entry['time']:.1f} s"))
 
     # ------------------------------------------------------------------ chaos
-    def _chaos_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        warning = QLabel(
-            "Debug: this deliberately damages this client's own traffic, to show that ordering and "
-            "recovery hold. Everyone else is unaffected."
-        )
-        warning.setWordWrap(True)
-        warning.setObjectName("muted")
-        layout.addWidget(warning)
-        row = QHBoxLayout()
-        self.latency_label = QLabel("Added latency: 0 ms")
-        row.addWidget(self.latency_label)
-        self.latency = QSlider(Qt.Orientation.Horizontal)
-        self.latency.setRange(0, 1000)
+    def _chaos_tab(self, master: tk.Misc) -> Frame:
+        page = Frame(master, "panel", padding=8)
+        Label(page, "Debug: this deliberately damages this client's own traffic, to show that "
+                    "ordering and recovery hold. Everyone else is unaffected.", "panelmuted",
+              wraplength=640, justify="left").pack(anchor="w")
+        row = Frame(page, "panel")
+        row.pack(fill="x", pady=(8, 0))
+        self.latency_label = Label(row, "Added latency: 0 ms", "panel", width=24)
+        self.latency_label.pack(side="left")
+        self.latency = Slider(row, 0, 1000)
         self.latency.valueChanged.connect(self._latency_changed)
-        row.addWidget(self.latency, 1)
-        layout.addLayout(row)
-        row = QHBoxLayout()
-        self.dup_label = QLabel("Duplicate frames: 0%")
-        row.addWidget(self.dup_label)
-        self.dup = QSlider(Qt.Orientation.Horizontal)
-        self.dup.setRange(0, 100)
+        self.latency.pack(side="left", fill="x", expand=True)
+        row = Frame(page, "panel")
+        row.pack(fill="x", pady=(8, 0))
+        self.dup_label = Label(row, "Duplicate frames: 0%", "panel", width=24)
+        self.dup_label.pack(side="left")
+        self.dup = Slider(row, 0, 100)
         self.dup.valueChanged.connect(self._dup_changed)
-        row.addWidget(self.dup, 1)
-        layout.addLayout(row)
-        row = QHBoxLayout()
-        drop = QPushButton("Drop connection")
-        drop.clicked.connect(self._drop)
-        row.addWidget(drop)
-        reorder = QPushButton("Reorder next 5")
-        reorder.clicked.connect(self._reorder)
-        row.addWidget(reorder)
-        reset = QPushButton("Reset")
-        reset.clicked.connect(self._reset)
-        row.addWidget(reset)
-        row.addStretch(1)
-        layout.addLayout(row)
-        layout.addStretch(1)
+        self.dup.pack(side="left", fill="x", expand=True)
+        row = Frame(page, "panel")
+        row.pack(fill="x", pady=(8, 0))
+        for text, action in (("Drop connection", self._drop), ("Reorder next 5", self._reorder),
+                             ("Reset", self._reset)):
+            button = Button(row, text)
+            button.clicked.connect(action)
+            button.pack(side="left", padx=(0, 6))
         return page
 
     def _latency_changed(self, value: int) -> None:

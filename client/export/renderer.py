@@ -10,11 +10,10 @@ from __future__ import annotations
 from collections.abc import Generator
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QRectF
-from PyQt6.QtGui import QPainter, QTransform
-
 from client.canvas.items import BoardItem
+from client.canvas.paint import Painter
 from client.canvas.scene import BoardScene
+from client.geom import Rect
 
 SCOPE_BOARD = "board"
 SCOPE_SELECTION = "selection"
@@ -64,25 +63,19 @@ def collect_items(scene: BoardScene, scope: Scope) -> list[BoardItem]:
     return items
 
 
-def bounds_of(items: list[BoardItem], margin: float = EXPORT_MARGIN) -> QRectF:
-    rect = QRectF()
+def bounds_of(items: list[BoardItem], margin: float = EXPORT_MARGIN) -> Rect:
+    rect = Rect()
     for item in items:
         rect = rect.united(item.sceneBoundingRect())
-    if rect.isNull():
-        return QRectF(0, 0, 100, 100)
+    if rect.is_null():
+        return Rect(0, 0, 100, 100)
     return rect.adjusted(-margin, -margin, margin, margin)
 
 
-def paint_items(
-    painter: QPainter, items: list[BoardItem], base: QTransform
-) -> Generator[int, None, None]:
+def paint_items(painter: Painter, items: list[BoardItem]) -> Generator[int, None, None]:
     """Paint in chunks, yielding the number of items done so the caller can show progress."""
     for index, item in enumerate(items):
-        painter.save()
-        painter.setTransform(item.sceneTransform() * base)
-        painter.setOpacity(item.opacity())
-        item.paint(painter)
-        painter.restore()
+        item.paint_with(painter)
         if (index + 1) % CHUNK == 0:
             yield index + 1
     yield len(items)

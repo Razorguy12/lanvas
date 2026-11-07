@@ -7,11 +7,11 @@ import json
 import logging
 import selectors
 import socket
+import threading
 import time
 
-from PyQt6.QtCore import QThread, pyqtSignal
-
 from client.boardlist import BoardTracker
+from client.widgets import Signal, call_in_ui
 from common import netutil
 from common.protocol import DISCOVER, PROTOCOL_VERSION, UDP_PORT
 
@@ -21,12 +21,13 @@ INTERFACE_POLL = 5.0
 TICK = 0.25
 
 
-class DiscoveryWorker(QThread):
-    boards_changed = pyqtSignal(list)
-    servers_changed = pyqtSignal(list)
+class DiscoveryWorker:
+    """Signals are emitted on the UI thread: the worker hands each change to the UI queue."""
 
     def __init__(self, port: int = UDP_PORT, extra_targets: list[tuple[str, int]] | None = None):
-        super().__init__()
+        self.boards_changed = Signal()
+        self.servers_changed = Signal()
+        self._thread: threading.Thread | None = None
         self.port = port
         self.extra_targets = extra_targets or []
         self.tracker = BoardTracker()
@@ -37,9 +38,17 @@ class DiscoveryWorker(QThread):
         """Safe from the UI thread: only sets a flag that the worker checks on its next tick."""
         self._refresh = True
 
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self.run, name="lanvas-discovery", daemon=True)
+        self._thread.start()
+
+    def isRunning(self) -> bool:  # noqa: N802
+        return self._thread is not None and self._thread.is_alive()
+
     def stop(self) -> None:
         self._stopping = True
-        self.wait(2000)
+        if self._thread is not None:
+            self._thread.join(2.0)
 
     def _send_discover(self, sock: socket.socket) -> None:
         packet = json.dumps({"t": DISCOVER, "protocol_version": PROTOCOL_VERSION}).encode()
@@ -97,10 +106,10 @@ class DiscoveryWorker(QThread):
                 boards, servers = self.tracker.boards(), self.tracker.servers()
                 if boards != last_boards:
                     last_boards = boards
-                    self.boards_changed.emit(boards)
+                    call_in_ui(lambda b=boards: self.boards_changed.emit(b))
                 if servers != last_servers:
                     last_servers = servers
-                    self.servers_changed.emit(servers)
+                    call_in_ui(lambda s=servers: self.servers_changed.emit(s))
         finally:
             selector.close()
             sender.close()
