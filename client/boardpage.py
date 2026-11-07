@@ -29,8 +29,7 @@ from PyQt6.QtWidgets import (
 from client import dialogs, icons, theme
 from client.boardlist import BoardEntry
 from client.canvas.view import CanvasView
-from client.export.pdf import export_pdf
-from client.export.png import export_raster, raster_size
+from client.export.formats import export_pdf, export_raster, export_svg, raster_size
 from client.export.renderer import (
     SCOPE_BOARD,
     SCOPE_FRAME,
@@ -38,13 +37,11 @@ from client.export.renderer import (
     ExportError,
     Scope,
 )
-from client.export.svg import export_svg
-from client.panels.access import AccessDialog
 from client.panels.chat import ChatPanel
 from client.panels.design import DesignPanel
 from client.panels.inspector import InspectorPanel
 from client.panels.layers import LayersPanel
-from client.panels.people import PeoplePopover
+from client.panels.sharing import AccessDialog, PeoplePopover
 from client.recovery import IoWorker
 from client.session import (
     SAVE_EDITED,

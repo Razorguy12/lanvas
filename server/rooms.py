@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from collections import deque
 from collections.abc import Callable
@@ -9,15 +10,15 @@ from pathlib import Path
 from typing import Any
 
 from common.model import Board, apply_op
-from server import recovery
 from server.acl import Acl, hash_secret
 from server.chatstore import ChatStore
-from server.oplog import OpLog
+from server.oplog import OpLog, load_json_file, recover_board, write_recovery_log
 from server.persist import RoomPaths, atomic_write_json
 
 REPLAY_WINDOW = 5000
 MAX_ROOM_NAME = 80
 MAX_DEDUPE = 200_000
+log = logging.getLogger("lanvas.recovery")
 
 
 def new_room_id() -> str:
@@ -75,16 +76,16 @@ class Room:
         unrecoverable."""
         room = cls(data_dir, room_id, clock)
         repairs: list[str] = []
-        meta = recovery.load_json_file(room.paths.room_json, repairs)
-        acl = recovery.load_json_file(room.paths.acl_json, repairs)
+        meta = load_json_file(room.paths.room_json, repairs)
+        acl = load_json_file(room.paths.acl_json, repairs)
         if not isinstance(meta, dict) or not isinstance(acl, dict) or "owner" not in acl:
-            recovery.log.error("room %s: metadata unrecoverable, not loaded", room_id)
+            log.error("room %s: metadata unrecoverable, not loaded", room_id)
             return None
         room.name = meta.get("name", room_id)
         room.code_hash = meta.get("code_hash", "")
         room.host_name = meta.get("host_name", "")
         room.acl.load(acl)
-        got = recovery.recover_board(room.paths, room_id, repairs)
+        got = recover_board(room.paths, room_id, repairs)
         room.board = got.board
         room.seq = got.seq
         room.seen_op_ids = got.seen_op_ids
@@ -93,7 +94,7 @@ class Room:
         room.oplog.last_snapshot_time = clock()
         repairs.extend(room.chat.load())
         room.chat.prune(room.acl.settings["chat_retention"])
-        recovery.write_recovery_log(room.paths, room_id, room.seq, room.board, repairs, clock())
+        write_recovery_log(room.paths, room_id, room.seq, room.board, repairs, clock())
         return room
 
     def save_meta(self) -> None:
