@@ -26,7 +26,7 @@ ALL_KINDS = (KIND_CREATE, KIND_UPDATE, KIND_DELETE, KIND_CLEAR, KIND_RESTORE, KI
 
 OBJECT_TYPES = (
     "frame", "rect", "ellipse", "line", "arrow", "path",
-    "text", "sticky", "image", "group", "comment",
+    "text", "sticky", "image", "group",
 )  # fmt: skip
 
 MAX_OBJECTS = 50_000
@@ -84,17 +84,6 @@ def _image(v: Any) -> bool:
     return isinstance(v, str) and len(v) <= MAX_IMAGE_B64
 
 
-def _replies(v: Any) -> bool:
-    if not isinstance(v, list) or len(v) > 500:
-        return False
-    for reply in v:
-        if not isinstance(reply, dict) or not _text(reply.get("text")):
-            return False
-        if not _name(reply.get("author", "")) or not _name(reply.get("ts", "")):
-            return False
-    return True
-
-
 PROP_RULES = {
     "x": _coord,
     "y": _coord,
@@ -113,9 +102,6 @@ PROP_RULES = {
     "font_size": lambda v: _num(v, 1, 1000),
     "font_weight": lambda v: _num(v, 100, 900),
     "image_data": _image,
-    "resolved": _bool,
-    "replies": _replies,
-    "author": _name,
     "x2": _coord,
     "y2": _coord,
 }
@@ -123,10 +109,8 @@ PROP_RULES = {
 _LENGTH_CAPS = {
     "text": MAX_TEXT,
     "name": MAX_NAME,
-    "author": MAX_NAME,
     "points": MAX_POINTS * 2,
     "image_data": MAX_IMAGE_B64,
-    "replies": 500,
 }
 
 _COMMON = {"x", "y", "w", "h", "rotation", "opacity", "locked", "visible", "name"}
@@ -145,7 +129,6 @@ TYPE_PROPS: dict[str, set[str]] = {
     "sticky": _COMMON | _TEXTUAL | {"fill"},
     "image": _COMMON | {"image_data"},
     "group": _COMMON,
-    "comment": {"x", "y", "text", "resolved", "replies", "author", "locked", "visible", "name"},
 }
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import os
 import random
 import time
@@ -11,16 +10,19 @@ import pytest
 
 from client import paths
 from client.document import Document
-from client.recovery import Journal, discard_crashed, find_crashed, rotate_backups
-from client.session import SAVE_LOCAL_ONLY, SAVE_SAVED, Session
+from client.recovery import Journal, discard_crashed, find_crashed
+from client.session import SAVE_SAVED, Session
 from client.transport import STATE_LIVE, NetCore
-from common.fileformat import Trust, board_hash, decode_lanvas, encode_lanvas
 from common.identity import Identity
 from common.model import Board, apply_op
 from common.protocol import MsgType
+from common.snapshot import board_hash
 from tests.harness import BotClient, add_member, make_room, start_server, wait_until
 
 pytestmark = pytest.mark.integration
+FULL_SOAK = os.environ.get("LANVAS_FULL_SOAK") == "1"
+SOAK_SECONDS = 60.0 if FULL_SOAK else 3.0
+SOAK_LATENCY = 0.3 if FULL_SOAK else 0.05
 
 
 # ---- Undo logic against a tiny in-process sequencer: deterministic, and without sockets ----
@@ -426,33 +428,6 @@ def test_SV_07_torn_journal_tail_tolerated(tmp_path):
 
 
 @pytest.mark.persist
-def test_SV_08_server_unreachable_saves_locally_then_checkpoints(srv):
-    port, handle = srv
-    owner = make_room(port)
-    room_id = owner.room_id
-    room = handle.server.rooms[room_id]
-    key = Identity.generate()
-    room.acl.add_member(key.fingerprint, "a", "editor")
-    a = Client(port, "a", key, room_id=room_id).start().wait_live()
-    a.session.create("rect", {"x": 1}, obj_id="r")
-    a.wait(lambda: not a.session.doc.pending)
-    handle.kill()
-    a.wait(lambda: not a.session.live)
-    a.session.save()
-    assert a.session.save_state == SAVE_LOCAL_ONLY and a.session.save_pending
-    a.session.io.flush()
-    backups = list(paths.backups_dir(room_id).glob("*.lanvas"))
-    assert len(backups) == 1
-    loaded = decode_lanvas(backups[0].read_bytes())
-    assert loaded.trust is Trust.SIGNED and loaded.board_hash == a.session.doc.hash()
-    handle.restart()
-    a.wait(lambda: a.session.save_state == SAVE_SAVED, timeout=20)
-    assert a.session.save_info["board_hash"] == a.session.doc.hash()
-    assert handle.server.rooms[room_id].oplog.read_index()
-    a.stop()
-
-
-@pytest.mark.persist
 def test_SV_01_hash_mismatch_triggers_refresh(srv):
     port, handle = srv
     owner = make_room(port)
@@ -512,66 +487,6 @@ def test_SV_11_restore_is_owner_only_and_needs_valid_checkpoint(srv):
     assert editor.wait_for(MsgType.OP_REJECT)["code"] == "NOT_ALLOWED"
     owner.send_op({"kind": "restore", "checkpoint_id": "cp_404"})
     assert owner.wait_for(MsgType.OP_REJECT)["code"] == "NOT_FOUND"
-
-
-@pytest.mark.persist
-def test_SV_12_create_room_from_file_hash_matches(srv):
-    port, handle = srv
-    source = make_room(port, "Original")
-    for i in range(10):
-        source.create_rect(f"o{i}", x=i)
-    source.send_op({"kind": "delete", "id": "o3"})  # the tombstone has to survive the round trip too
-    source.recv_until(11)
-    key = Identity.generate()
-    doc = {"objects": source.board.objects}
-    from common.fileformat import build_document
-
-    raw = encode_lanvas(build_document(doc, "Original", 11, "t", key, "me"))
-    loaded = decode_lanvas(raw)
-    assert loaded.trust is Trust.SIGNED
-
-    a = Client(port, "me", key, create={"name": "From file"}).start().wait_live()
-    a.session.replace_board(list(loaded.board["objects"].values()))
-    a.wait(lambda: not a.session.doc.pending)
-    room = handle.server.rooms[a.session.room_id]
-    assert board_hash(room.board) == loaded.board_hash
-    a.stop()
-
-
-@pytest.mark.persist
-def test_SV_13_backup_rotation_keeps_newest_20(tmp_path):
-    for i in range(25):
-        (tmp_path / f"2026010{i:02d}.lanvas").write_bytes(b"x")
-    rotate_backups(tmp_path)
-    kept = sorted(p.name for p in tmp_path.glob("*.lanvas"))
-    assert len(kept) == 20 and kept[0] == "202601005.lanvas" and kept[-1] == "202601024.lanvas"
-
-
-@pytest.mark.export
-def test_EX_05_session_export_excludes_dms_and_hash_survives(srv):
-    port, _ = srv
-    owner = make_room(port)
-    peer = add_member(owner, port, "peer")
-    a = Client(port, "owner", owner.key, room_id=owner.room_id).start().wait_live()
-    a.session.create("rect", {"x": 1}, obj_id="r")
-    a.session.send_chat("room", "room words")
-    dm = a.session.chat.ensure_dm(peer.fp, "peer")
-    a.session.send_chat(dm.channel_id, "dm-secret-words")
-    a.wait(lambda: not a.session.doc.pending and not a.session.chat.outbox)
-    raw = encode_lanvas(a.session.export_document(include_chat=True))
-    assert b"dm-secret-words" not in gzip.decompress(raw)
-    loaded = decode_lanvas(raw)
-    assert [m["text"] for m in loaded.room_chat] == ["room words"]
-    assert loaded.board_hash == a.session.doc.hash() and loaded.trust is Trust.SIGNED
-    a.stop()
-
-
-# ---- Chaos: the demo's claim, tested. ----
-# The everyday run is shortened so that it fits in the pre-push check. LANVAS_FULL_SOAK=1 runs the
-# catalogue's real parameters (300 ms, 20% duplicates, 60 s), and the gate report records which ran.
-FULL_SOAK = os.environ.get("LANVAS_FULL_SOAK") == "1"
-SOAK_SECONDS = 60.0 if FULL_SOAK else 3.0
-SOAK_LATENCY = 0.3 if FULL_SOAK else 0.05
 
 
 @pytest.mark.chaos

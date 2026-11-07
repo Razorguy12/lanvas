@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import QApplication
 
 from client import paths, theme
 from client.app import AppWindow
+from common.logging_setup import configure_logging
 from common.protocol import UDP_PORT
 
 
@@ -27,12 +28,13 @@ def main(argv: list[str] | None = None) -> int:
         help="self-test a packaged build against a running server, then exit",
     )
     args, qt_args = parser.parse_known_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.WARNING,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
     if args.profile:
         paths.set_profile(args.profile)
+    configure_logging(
+        paths.app_dir() / "logs" / "lanvas.log",
+        console_level=logging.DEBUG if args.verbose else logging.WARNING,
+        file_level=logging.DEBUG if args.verbose else logging.INFO,
+    )
     app = QApplication([sys.argv[0], *qt_args])
     app.setApplicationName("LANvas")
     theme.load_fonts()

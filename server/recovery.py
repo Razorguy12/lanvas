@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from common.durable import read_json_with_bak, scan_log, truncate_log
-from common.fileformat import board_hash, decode_snapshot
 from common.model import Board, apply_op
+from common.snapshot import board_hash, decode_snapshot
 from server.persist import RoomPaths, iso_utc
 
 log = logging.getLogger("lanvas.recovery")

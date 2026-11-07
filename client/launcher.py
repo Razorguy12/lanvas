@@ -125,7 +125,6 @@ class LauncherPage(QWidget):
     join_board = pyqtSignal(object, str)
     join_by_address = pyqtSignal()
     create_room = pyqtSignal()
-    open_file = pyqtSignal()
     refresh = pyqtSignal()
     recover = pyqtSignal()
     name_changed = pyqtSignal(str)
@@ -223,9 +222,6 @@ class LauncherPage(QWidget):
         create = QPushButton("Create room…")
         create.clicked.connect(self.create_room.emit)
         actions.addWidget(create)
-        open_file = QPushButton("Open .lanvas…")
-        open_file.clicked.connect(self.open_file.emit)
-        actions.addWidget(open_file)
         actions.addStretch(1)
         column.addLayout(actions)
 

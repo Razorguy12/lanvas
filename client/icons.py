@@ -17,7 +17,6 @@ _PATHS = {
     "eraser": '<path d="M7 21L3 17a2 2 0 010-3L14 3a2 2 0 013 0l4 4a2 2 0 010 3L10 21zM22 21H7M9 8l7 7"/>',
     "text": '<path d="M4 7V4h16v3M9 20h6M12 4v16"/>',
     "sticky": '<path d="M4 4h16v10l-6 6H4zM14 20v-6h6"/>',
-    "comment": '<path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>',
     "image": '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>'
     '<path d="M21 15l-5-5L5 21"/>',
     "hand": '<path d="M18 11V6a2 2 0 00-4 0M14 10V4a2 2 0 00-4 0v2M10 10.5V6a2 2 0 00-4 0v8M18 8a2 2 '

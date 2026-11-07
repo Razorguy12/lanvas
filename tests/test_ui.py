@@ -22,11 +22,10 @@ from client.export.png import export_raster, raster_size
 from client.export.renderer import SCOPE_FRAME, SCOPE_SELECTION, Scope, drive
 from client.export.svg import export_svg
 from client.request_screen import STATE_DENIED
-from common.fileformat import Trust, board_hash, build_document, decode_lanvas, encode_lanvas
-from common.identity import Identity
 from common.model import Board, apply_op
 from common.protocol import MsgType
 from common.simplify import simplify
+from common.snapshot import board_hash
 from tests.harness import BotClient, add_member, make_room, start_server, wait_until
 
 pytestmark = [pytest.mark.ui]
@@ -219,15 +218,6 @@ def test_EX_04_pdf_paper_sizes(qapp, page):
 
 
 @pytest.mark.export
-def test_EX_05_lanvas_round_trip_through_board_hash(qapp):
-    board = sample_board()
-    key = Identity.generate()
-    raw = encode_lanvas(build_document(board, "R", 7, "t", key, "me"))
-    loaded = decode_lanvas(raw)
-    assert loaded.board_hash == board_hash(board) and loaded.trust is Trust.SIGNED
-
-
-@pytest.mark.export
 def test_EX_06_scope_selection_and_frame_only_those_objects(qapp):
     scene = scene_for(sample_board())
     from client.export.renderer import collect_items
@@ -240,14 +230,13 @@ def test_EX_06_scope_selection_and_frame_only_those_objects(qapp):
 
 
 @pytest.mark.export
-def test_EX_06_hidden_objects_and_comments_not_exported(qapp):
+def test_EX_06_hidden_objects_not_exported(qapp):
     board = sample_board()
     board.objects["e"]["props"]["visible"] = False
-    _obj(board, "c", "comment", x=5, y=5, text="review note")
     from client.export.renderer import collect_items
 
     ids = {i.obj_id for i in collect_items(scene_for(board), Scope())}
-    assert "e" not in ids and "c" not in ids
+    assert "e" not in ids
 
 
 @pytest.mark.export
@@ -387,8 +376,6 @@ def test_full_flow_create_draw_chat_save(qapp, window, srv, home):
     assert spin(qapp, lambda: session.save_state == "saved")
     assert session.save_info["board_hash"] == session.doc.hash()
     assert "Saved" in window.board.save_chip.text()
-    session.io.flush()
-    assert list(paths.backups_dir(session.room_id).glob("*.lanvas"))
 
 
 def test_R1_eraser_removes_whole_stroke_for_everyone(qapp, window, srv):
@@ -604,7 +591,7 @@ def test_reconnect_banner_and_editing_continue(qapp, window, srv):
     assert window.board.reconnect_banner.isVisible()
     session.create("rect", {"x": 1, "y": 1, "w": 5, "h": 5}, obj_id="offline")
     session.save()
-    assert session.save_state == "local_only"
+    assert session.save_state == "pending"
     assert "pending" in window.board.save_chip.text()
     handle.restart()
     assert spin(qapp, lambda: session.live and not session.doc.pending, timeout=15)
@@ -639,34 +626,6 @@ def test_inspector_hides_other_peoples_dm_text():
     assert scrub_private(frame, "A")["text"] == "secret"
     assert scrub_private(frame, "C")["text"] == "«private, 6 chars»"
     assert scrub_private({"channel_id": "room", "text": "open"}, "C")["text"] == "open"
-
-
-def test_open_file_dialog_trust_headers(qapp, window, tmp_path):
-    key = Identity.generate()
-    doc = build_document(sample_board(), "Signed", 1, "t", key, "Alice")
-    good = tmp_path / "good.lanvas"
-    good.write_bytes(encode_lanvas(doc))
-    loaded = window.read_file(good)
-    text, _ = dialogs.trust_text(loaded)
-    assert text.startswith("✓ Signed by Alice")
-    doc["board"]["objects"]["r"]["props"]["x"] = 999
-    bad = tmp_path / "bad.lanvas"
-    bad.write_bytes(encode_lanvas(doc))
-    text, _ = dialogs.trust_text(window.read_file(bad))
-    assert text.startswith("⚠ This file was modified")
-    dialog = dialogs.OpenFileDialog(window.read_file(good))
-    assert len(dialog.scene.items_by_id) == 7
-
-
-def test_SV_12_create_room_from_file_through_window(qapp, window, srv, tmp_path):
-    port, handle = srv
-    board = sample_board()
-    board.objects["e"]["deleted"] = True
-    window.seed_objects = list(board.objects.values())
-    window.connect_to("127.0.0.1", port, {"create": {"name": "From file"}})
-    assert spin(qapp, lambda: window.session and window.session.welcomed and not window.session.doc.pending and window.session.doc.seq == 1)
-    room = handle.server.rooms[window.session.room_id]
-    assert board_hash(room.board) == board_hash(board) == window.session.doc.hash()
 
 
 def test_SV_07_recover_banner_and_dialog(qapp, home, srv):
@@ -810,13 +769,10 @@ def test_kicked_member_returned_to_launcher(qapp, window, srv):
 
 def test_export_dialog_only_enables_relevant_options(qapp):
     dialog = dialogs.ExportDialog([("f", "F1")], True, lambda d: "x")
-    assert dialog.scale.isEnabled() and not dialog.page.isEnabled() and not dialog.protect.isEnabled()
+    assert dialog.scale.isEnabled() and not dialog.page.isEnabled()
     pdf = next(b for b in dialog.format_group.buttons() if b.text() == "PDF")
     pdf.setChecked(True)
     assert dialog.page.isEnabled() and not dialog.scale.isEnabled()
-    native = next(b for b in dialog.format_group.buttons() if b.text() == ".lanvas")
-    native.setChecked(True)
-    assert dialog.protect.isEnabled() and not dialog.scope_frame.isEnabled()
 
 
 def test_image_object_round_trip(qapp):

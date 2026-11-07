@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from common import fractional as fr
-from common.fileformat import board_hash
 from common.identity import (
     Identity,
     fingerprint_of,
@@ -19,6 +18,7 @@ from common.identity import (
 )
 from common.model import MAX_OBJECTS, MAX_POINTS, MAX_TEXT, Board, apply_op, validate_op
 from common.protocol import ErrorCode
+from common.snapshot import board_hash
 
 pytestmark = pytest.mark.unit
 

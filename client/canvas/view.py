@@ -24,13 +24,12 @@ from PyQt6.QtGui import (
     QPolygonF,
     QTransform,
 )
-from PyQt6.QtWidgets import QGraphicsView, QInputDialog, QPlainTextEdit
+from PyQt6.QtWidgets import QGraphicsView, QPlainTextEdit
 
 from client import theme
 from client.canvas.items import flat_to_path, object_rect, text_font
 from client.canvas.scene import BoardScene
 from client.canvas.tools import (
-    CommentTool,
     EraserTool,
     HandTool,
     LineTool,
@@ -56,7 +55,6 @@ class CanvasView(QGraphicsView):
     selection_changed = pyqtSignal()
     zoom_changed = pyqtSignal(float)
     tool_changed = pyqtSignal(str)
-    comment_requested = pyqtSignal(str)
 
     def __init__(self, session: Any, parent: Any = None) -> None:
         super().__init__(parent)
@@ -91,7 +89,6 @@ class CanvasView(QGraphicsView):
             "arrow": LineTool(self, "arrow"),
             "text": TextTool(self),
             "sticky": StickyTool(self),
-            "comment": CommentTool(self),
         }
         self.tool: Tool = self.tools["select"]
         self.remote_cursors: dict[str, dict[str, Any]] = {}
@@ -438,27 +435,6 @@ class CanvasView(QGraphicsView):
                 self._commit_editor()
         return super().eventFilter(watched, event)
 
-    def create_comment(self, pos: QPointF) -> None:
-        text, ok = QInputDialog.getMultiLineText(self, "Add a comment", "Comment")
-        if not ok or not text.strip():
-            return
-        op = self.session.create(
-            "comment",
-            {
-                "x": pos.x(),
-                "y": pos.y(),
-                "text": text.strip()[:20000],
-                "author": self.session.username,
-                "resolved": False,
-                "replies": [],
-            },
-        )
-        if op:
-            self.comment_requested.emit(op["id"])
-
-    def open_comment(self, obj_id: str) -> None:
-        self.comment_requested.emit(obj_id)
-
     # ------------------------------------------------------------------ remote presence
     def on_transient(self, msg: dict[str, Any]) -> None:
         kind = msg.get("k")
@@ -655,7 +631,7 @@ class CanvasView(QGraphicsView):
             if obj is None:
                 return
             painter.drawPolygon(self._outline(obj))
-            if not self.can_edit() or obj["type"] == "comment":
+            if not self.can_edit():
                 return
             if obj["props"].get("locked"):
                 self._paint_lock(painter, obj)

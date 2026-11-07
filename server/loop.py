@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from common import chat as c
-from common.fileformat import board_hash
 from common.identity import b64, fingerprint_of, unb64, verify_proof
 from common.model import (
     KIND_BULK_CREATE,
@@ -44,6 +43,7 @@ from common.protocol import (
     ProtocolError,
     encode_frame,
 )
+from common.snapshot import board_hash
 from server import acl as A
 from server.discovery import Discovery, default_server_name
 from server.persist import atomic_write_json, iso_utc, read_json_with_bak

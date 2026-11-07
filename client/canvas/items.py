@@ -28,7 +28,6 @@ from client import theme
 
 HIT_MARGIN = 6.0
 ARROW_SIZE = 12.0
-PIN_SIZE = 22.0
 
 
 def to_color(value: str | None) -> QColor | None:
@@ -52,8 +51,6 @@ def object_rect(obj: dict[str, Any]) -> QRectF:
     if kind in ("line", "arrow"):
         rect = QRectF(0, 0, props.get("x2", 0), props.get("y2", 0)).normalized()
         return rect
-    if kind == "comment":
-        return QRectF(0, -PIN_SIZE, PIN_SIZE, PIN_SIZE)
     return QRectF(0, 0, props.get("w", 0), props.get("h", 0))
 
 
@@ -105,7 +102,7 @@ class BoardItem(QGraphicsItem):
         self.setPos(props.get("x", 0), props.get("y", 0))
         rect = object_rect(obj)
         self.setTransformOriginPoint(rect.center())
-        self.setRotation(props.get("rotation", 0) if obj["type"] not in ("comment",) else 0)
+        self.setRotation(props.get("rotation", 0))
         self.setOpacity(props.get("opacity", 1))
         self.setVisible(props.get("visible", True) and not obj["deleted"])
         margin = props.get("stroke_w", 0) if props.get("stroke") else 0
@@ -256,23 +253,3 @@ class BoardItem(QGraphicsItem):
             painter.setPen(QPen(QColor("#B3B3B3"), 1, Qt.PenStyle.DashLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
-
-    def _paint_comment(self, painter: QPainter) -> None:
-        props = self.obj["props"]
-        color = QColor("#14AE5C") if props.get("resolved") else QColor("#FFA629")
-        painter.setPen(QPen(QColor("#FFFFFF"), 1.5))
-        painter.setBrush(color)
-        path = QPainterPath()
-        path.setFillRule(Qt.FillRule.WindingFill)  # the overlap is solid, not a hole
-        path.addRoundedRect(QRectF(0, -PIN_SIZE, PIN_SIZE, PIN_SIZE), 11, 11)
-        path.addRect(QRectF(0, -11, 11, 11))
-        painter.drawPath(path.simplified())
-        painter.setPen(QColor("#1E1E1E"))
-        font = QFont(theme.FONT_FAMILY)
-        font.setPixelSize(11)
-        font.setWeight(QFont.Weight.DemiBold)
-        painter.setFont(font)
-        initial = (props.get("author") or "?")[:1].upper()
-        painter.drawText(
-            QRectF(0, -PIN_SIZE, PIN_SIZE, PIN_SIZE), int(Qt.AlignmentFlag.AlignCenter), initial
-        )

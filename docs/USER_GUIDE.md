@@ -24,7 +24,7 @@ The owner gets a notice with **Review**, then chooses **Approve as Editor**, **A
 |---|---|
 | Owner | Everything, including approvals, roles, restoring versions |
 | Editor | Draw and edit, chat, Ctrl+S |
-| Viewer | Watch and chat; save copies only if the owner allows it |
+| Viewer | Watch and chat; export only if the owner allows it |
 
 ## Tools
 
@@ -34,7 +34,7 @@ The owner gets a notice with **Review**, then chooses **Approve as Editor**, **A
 | `F` | Frame | `E` | Eraser (removes whole strokes) |
 | `R` | Rectangle | `T` | Text |
 | `O` | Ellipse | `S` | Sticky note |
-| `L` / `Shift+L` | Line / arrow | `C` | Comment |
+| `L` / `Shift+L` | Line / arrow | `S` | Sticky note |
 
 Hold `Space` to pan. `Ctrl`+scroll zooms; `Ctrl+0` is 100%, `Shift+1` fits the board. `Ctrl+D` duplicates, `Ctrl+G` groups, `Del` deletes, `Ctrl+]` and `Ctrl+[` change stacking order. `Ctrl+\` hides the panels.
 
@@ -52,17 +52,13 @@ History stays through reconnects and server restarts. Offline members get their 
 
 ## Saving
 
-**Ctrl+S** makes a verified checkpoint on the server and a signed copy on your machine. The status bar shows the result. If the server is unreachable, the local copy is still written and the checkpoint follows on reconnect.
-
-**Ctrl+Shift+S** saves a `.lanvas` wherever you choose, optionally with a password. If you forget the password, the file cannot be opened.
-
-**Ctrl+O** opens a `.lanvas`, showing who signed it or warning that it was modified. From there you can make a new room from it.
+**Ctrl+S** makes a verified checkpoint on the server. The status bar shows the result. If the server is unreachable, the checkpoint request is sent when the connection returns. Crash recovery keeps unsent changes in the local recovery journal.
 
 The owner can restore any saved version under **Version history**. Restoring affects everyone, and `Ctrl+Z` undoes it.
 
 ## Export
 
-**Ctrl+Shift+E** exports PNG, JPEG, SVG, PDF, or `.lanvas`, for the whole board, the selection, or one frame. PDF can put each frame on its own page.
+**Ctrl+Shift+E** exports PNG, JPEG, SVG, or PDF, for the whole board, the selection, or one frame. PDF can put each frame on its own page.
 
 ## When things go wrong
 

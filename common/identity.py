@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from common import durable
 
 # The proof signs this prefix plus the nonce, not the bare nonce. Otherwise a rogue server could
-# send a "nonce" that is really the bytes of a .lanvas file and obtain a valid file signature.
+# Domain separation prevents a proof signature from being reused for another signed payload.
 PROOF_DOMAIN = b"LANVAS-PROOF-v2:"
 NONCE_BYTES = 32
 FINGERPRINT_HEX = 32

@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from common import fractional
-from common.fileformat import board_hash
 from common.model import (
     KIND_BULK_CREATE,
     KIND_CLEAR,
@@ -27,6 +26,7 @@ from common.model import (
     Board,
     apply_op,
 )
+from common.snapshot import board_hash
 
 MAX_UNDO = 200
 # A property that was absent before an edit has no recorded value, so undo restores its default.

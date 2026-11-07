@@ -37,11 +37,11 @@ A **Figma-style, offline, LAN-only collaborative design whiteboard** where the r
 ## 5. Differentiators (our "unique angle")
 
 1. **Creator-gated access with a request-to-join flow** (Section 7).
-2. **Figma-style object canvas**: shapes, frames, layers, properties panel, multiplayer cursors, comments.
+2. **Figma-style object canvas**: shapes, frames, layers, properties panel, multiplayer cursors, sticky notes.
 3. **Live board discovery**: a device that joins the network sees the available boards in its launcher within seconds (only board names are advertised, never content or codes).
 4. **Room chat plus private messages**, both kept as history across reconnects and server restarts.
-5. **Secure save and recovery**: Ctrl+S makes a verified server checkpoint plus a signed local copy; crash-safe files and an automatic recovery dialog.
-6. **Export anywhere**: PNG, JPEG, SVG, PDF, and the native signed `.lanvas` file.
+5. **Secure save and recovery**: Ctrl+S makes a verified server checkpoint; a local recovery journal supports crash recovery.
+6. **Export anywhere**: PNG, JPEG, SVG, and PDF.
 7. **Live Packet Inspector** showing every frame, sequence number, size, and latency.
 8. **Chaos / Network Simulator** (delay, duplicate, reorder, drop connection) to prove ordering and recovery live.
 9. **Version history** built on the append-only operation log and checkpoints.
@@ -60,17 +60,16 @@ Tiers describe *what*; the phases in `Agents.md` §11 describe *in which order* 
 - New joiner receives the current board and recent chat; reconnect recovers the latest state
 - Undo / redo with defined multi-user behavior
 - Clear canvas (permission required)
-- **Save with Ctrl+S** (server checkpoint + signed local copy), open/load `.lanvas`, **crash recovery** on server and client
-- **Export:** PNG and `.lanvas`
+- **Save with Ctrl+S** (server checkpoint), crash recovery on server and client
+- **Export:** PNG
 - **Access control: owner-approved membership** (this is Tier 1 for us, not optional)
 
 ### Tier 2: the Figma feel (Phase 5)
 - Select, move, resize, rotate, multi-select; z-order; layers panel; properties panel
 - Zoom, pan, snap guides, align tools, duplicate, group
 - Frames, sticky notes, arrows, image insertion
-- Comments pinned to the canvas
-- **Export:** JPEG, SVG, PDF (including "each frame as a page"), scope = board / selection / frame; password-protected `.lanvas`
-- Checkpoint browser and restore (owner); create a room from a `.lanvas` file
+- **Export:** JPEG, SVG, PDF (including "each frame as a page"), scope = board / selection / frame
+- Checkpoint browser and restore (owner)
 - Packet Inspector; chaos simulator
 
 ### Tier 3: stretch (Phase 6, only if Tiers 1 and 2 pass multi-machine tests)
@@ -121,7 +120,7 @@ Identity: **a Figma-class canvas that is network-transparent and security-native
 - A third member, or a raw socket client, never receives a private message that is not theirs (CT-02, CT-07).
 - Room chat and private messages, with order, timestamps, and unread positions, survive a server restart (CT-08).
 - Pending and denied users cannot send or read any chat (CT-05).
-- Private messages are never exported in `.lanvas` files and never shown in someone else's Packet Inspector.
+- Private messages are never shown in someone else's Packet Inspector.
 
 **Honest limit:** private messages are private from other members, not from whoever controls the server machine; they are not end-to-end encrypted (see §9 non-goals).
 
@@ -135,11 +134,9 @@ Identity: **a Figma-class canvas that is network-transparent and security-native
 
 ## 10. Save, recovery, and export (product rules)
 
-- **Ctrl+S always does something useful.** Editors and owners get a verified server checkpoint and a signed local copy; viewers (if allowed to export) get the local copy; if the server is unreachable the local copy is still written and the server checkpoint follows on reconnect.
+- **Ctrl+S saves a verified server checkpoint.** If the server is unreachable, the checkpoint request follows on reconnect. The local recovery journal preserves unsent work after a crash.
 - **A crash never costs more than the last few hundred milliseconds of edits.** The server repairs itself on restart; the client offers a Recover dialog with unsent changes.
-- **Every export opens offline** on another machine and OS: PNG, JPEG, SVG, PDF, `.lanvas`.
-- **`.lanvas` files can be trusted:** the app shows who signed a file and warns if it was modified; files can be password-protected.
-
+- **Every export opens offline** on another machine and OS: PNG, JPEG, SVG, PDF.
 ## 11. Success criteria
 
 - Demo runs from the downloaded zip on a fresh machine, offline, in under 3 minutes of setup.
@@ -162,7 +159,7 @@ Identity: **a Figma-class canvas that is network-transparent and security-native
 8. Kill B's Wi-Fi; reconnect; show resync from `last_seq`.
 9. Undo/redo with two users; show conflict-aware behavior.
 10. A presses **Ctrl+S**: "Saved · checkpoint" with matching hash. **Kill the server process**, restart it: board, chat, and DMs are back.
-11. Export **PDF** and **PNG**; open them on another machine. Show the signed `.lanvas` and version history (if built).
+11. Export **PDF** and **PNG**; open them on another machine. Show version history (if built).
 
 ## 13. Rubric mapping
 
@@ -174,7 +171,7 @@ Identity: **a Figma-class canvas that is network-transparent and security-native
 | Performance | Batching, simplification, throttled cursors, batched fsync, stats | Architecture §9 |
 | Concurrency | Single-threaded selector loop, global seq, per-channel chat seq | Architecture §5, §4.5 |
 | Reliability / recovery | Atomic checksummed storage, integrity scan, client journal | Architecture §12 |
-| Security / access | Owner-approved ACL, signed identity, DM routing, signed save files, rate limits | Architecture §8 |
+| Security / access | Owner-approved ACL, signed identity, DM routing, rate limits | Architecture §8 |
 | Extras | Discovery, private chat, export formats, chaos sim, inspector, history | §5 above |
 
 ## 14. Risks
@@ -197,7 +194,6 @@ Identity: **a Figma-class canvas that is network-transparent and security-native
 - **Snapshot:** full serialized board state at a given seq (automatic).
 - **Checkpoint:** a snapshot made on Ctrl+S, kept until the owner deletes it, restorable.
 - **Recovery journal:** client-side file of the last confirmed board plus unsent changes, used after a crash.
-- **`.lanvas`:** native, signed (optionally encrypted) board file.
 - **ACL:** access control list for a room (identity to role).
 - **Identity:** a client keypair; its public-key fingerprint is the user's stable ID.
 - **Phase gate:** the set of tests that must pass before the next phase starts (`Agents.md` §11).
@@ -233,8 +229,8 @@ Each row must be **demonstrable offline on the demo hardware**. IDs refer to `Ar
 | R21 | Private messages between users | CT-02..CT-07, CT-11 | only the two members receive them | demo step 5 + raw-socket test report |
 | R22 | Chat history retained | CT-08..CT-10 | room chat and DMs survive reconnect and server restart | video clip |
 | R23 | Available boards shown when a device joins the network | DS-01..DS-08 | board appears without typing an address; nothing private advertised | screen recording |
-| R24 | Export PNG, JPEG, SVG, PDF, `.lanvas` | EX-01..EX-08 | every file opens on another OS offline; `.lanvas` hash matches | exported files |
-| R25 | Secure save and file recovery | SV-01..SV-13 | Ctrl+S verified; crash at any write step recovers; tampering detected | test report + demo step 10 |
+| R24 | Export PNG, JPEG, SVG, PDF | EX-01..EX-08 | every file opens on another OS offline | exported files |
+| R25 | Secure save and file recovery | SV-01..SV-07, SV-11 | Ctrl+S verified; crash recovery and checkpoint restore work | test report + demo step 10 |
 
 ### Demo-day checklist
 - [ ] Router/hotspot with internet off; machine IPs noted
@@ -243,5 +239,5 @@ Each row must be **demonstrable offline on the demo hardware**. IDs refer to `Ar
 - [ ] Client launchers open first; server started; the room appears by itself
 - [ ] Owner, editor, viewer, and a rejected visitor ready
 - [ ] Chaos mode and inspector tested beforehand
-- [ ] Backup: second laptop with the same build; signed `.lanvas` of the board; exported PDF; screenshots of the test log
+- [ ] Backup: second laptop with the same build; exported PDF; screenshots of the test log
 - [ ] Every member knows their module and can answer questions about it

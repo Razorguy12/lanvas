@@ -4,7 +4,7 @@
 
 > **Implementation notes (spec gaps filled while building, no wire change from a released version).** `HELLO` also carries `create`, `invite` and `last_seq` (§4.2). `ADMIN` has an S→C reply (§4.2). A sixth op kind, `bulk_create`, gives "bulk create" its wire form (§5.2). Server-to-client frames may reach 64 MB (§4.1). Announces carry `require_code` per room (§4.4). Crash-safety code lives once in `common/durable.py` (§12.1).
 
-> **Spec revision 2** adds: private (direct) messages and retained chat history (§4.5), live board discovery (§4.4), secure save with Ctrl+S and file recovery (§12), and export to PNG/JPEG/SVG/PDF/`.lanvas` (§12.5). `PROTOCOL_VERSION = 2`.
+> **Spec revision 2** adds: private (direct) messages and retained chat history (§4.5), live board discovery (§4.4), secure save with Ctrl+S and file recovery (§12), and export to PNG/JPEG/SVG/PDF (§12.5). `PROTOCOL_VERSION = 2`.
 
 ---
 
@@ -57,7 +57,7 @@ lanvas/
 │   ├─ fractional.py    # fractional indexing for z-order
 │   ├─ identity.py      # Ed25519 keys, fingerprints, signatures
 │   ├─ chat.py          # chat message schema, channel ids, validation
-│   ├─ fileformat.py    # .lanvas read/write: canonical JSON, hash, signature, encryption
+│   ├─ snapshot.py      # canonical JSON, board hash, verified recovery snapshots
 │   ├─ durable.py       # the durable writer, shared by server and client (§12.1)
 │   ├─ netutil.py       # IPv4 interfaces, broadcast addresses, shared discovery socket
 │   └─ simplify.py      # Ramer-Douglas-Peucker stroke simplification (§9)
@@ -90,7 +90,7 @@ lanvas/
 └─ build/ (pyinstaller specs)
 ```
 
-Rules: `common/` and `server/` import **no Qt**. `client/` never imports `server/`. `common/fileformat.py` is shared so that the server and client produce byte-identical canonical JSON and hashes.
+Rules: `common/` and `server/` import **no Qt**. `client/` never imports `server/`. `common/snapshot.py` is shared so that the server and client produce byte-identical canonical JSON and hashes.
 
 ## 4. Protocol
 
@@ -212,7 +212,7 @@ CHAT { msg_id: "clientId:counter", channel: "room" | "dm", to: "<fingerprint>" (
 Board
  └─ objects: { id → Object }           # flat map, tree via parent
 Object { id, type, parent, z (fractional index), props{...}, deleted }
- type ∈ frame | rect | ellipse | line | arrow | path | text | sticky | image | group | comment
+ type ∈ frame | rect | ellipse | line | arrow | path | text | sticky | image | group
  props: x, y, w, h, rotation, fill, stroke, stroke_w, opacity, locked,
         points[] (path), text, font_size, … (validated per type)
 ```
@@ -308,7 +308,7 @@ Permission matrix:
 | Read chat history (room + own DMs only) | ✔ | ✔ | ✔ | ✘ |
 | Clear room chat, set chat retention | ✔ | ✘ | ✘ | ✘ |
 | `SAVE` (server checkpoint, Ctrl+S) | ✔ | ✔ | ✘ | ✘ |
-| Export / save a local copy (client-side) | ✔ | ✔ | owner-configurable | ✘ |
+| Export (client-side) | ✔ | ✔ | owner-configurable | ✘ |
 | Clear board | ✔ | owner-configurable | ✘ | ✘ |
 | Restore a checkpoint | ✔ | ✘ | ✘ | ✘ |
 | Approve/deny, set roles, kick, mute, lock board | ✔ | ✘ | ✘ | ✘ |
@@ -357,7 +357,7 @@ Requests queue in the ACL; owner gets them on next connect. Approved members kee
 - **UI thread:** all Qt objects, including the scene render used by export. Never blocks on the network or on large disk writes.
 - **NetWorker thread:** owns the TCP socket; receives frames, emits Qt signals (`op_received`, `chat_received`, `presence`, `save_ack`, …); sends from a thread-safe queue.
 - **DiscoveryWorker thread:** owns the UDP socket; emits `boards_changed(list)`.
-- **IO worker (`QThreadPool`):** recovery journal writes, `.lanvas` save, encoding and writing export files.
+- **IO worker (`QThreadPool`):** recovery journal writes and encoding/writing export files.
 - Qt widgets are never touched from worker threads.
 
 ## 11. Packet Inspector and Chaos Simulator (client-side shim)
@@ -404,12 +404,10 @@ Snapshot / checkpoint file:
 
 ### 12.3 Ctrl+S: secure save
 
-Pressing **Ctrl+S** (or the Save button) does two things, both off the UI thread:
+Pressing **Ctrl+S** (or the Save button) requests a verified server checkpoint:
 
 1. **Server checkpoint** (owner/editor): the client sends `SAVE{label?}`. The server flushes and `fsync`s `ops.jsonl` and chat logs, writes a checksummed checkpoint at the current `seq` atomically, adds it to `checkpoints/index.json`, and replies `SAVE_ACK{checkpoint_id, seq, board_hash, time}`. The client compares `board_hash` with its own; a mismatch triggers `RESYNC` and a warning toast. Viewers get `SAVE_REJECT{NOT_ALLOWED}` and the UI explains it.
-2. **Local secure copy** (all roles allowed to export): the client writes a signed `.lanvas` file of the confirmed board into its user data dir (`backups/<room_id>/<timestamp>.lanvas`, newest 20 kept). If the server cannot be reached, this local copy is still written, and the status bar says "Saved locally; server checkpoint pending". The pending `SAVE` is sent on reconnect.
 
-**Ctrl+Shift+S (Save a copy…)** writes a `.lanvas` to a location the user picks, with optional password encryption.
 
 The owner can browse checkpoints (Version history) and `restore` one (§5.2).
 
@@ -425,10 +423,9 @@ The owner can browse checkpoints (Version history) and `restore` one (§5.2).
 **Client crash recovery (`client/recovery.py`)**
 - While a board is open, the client keeps a **recovery journal** in its user data dir: the last confirmed board (rewritten atomically every 30 s or 200 ops) plus an append log of un-acked local ops and unsent chat.
 - A `session.lock` file (with PID) is created on open and removed on clean exit.
-- On next launch, a stale lock means the client crashed. The **Recover** dialog offers: *Rejoin and send my unsaved changes* (re-sent with original `op_id`s, so the server dedupes anything that already arrived), *Save recovered board as .lanvas*, or *Discard*.
-- If the server's room is gone (server data lost), the owner can create a new room from a `.lanvas` file or a local backup ("Open .lanvas" → new room, owner only).
+- On next launch, a stale lock means the client crashed. The **Recover** dialog offers: *Rejoin and send my unsaved changes* (re-sent with original `op_id`s, so the server dedupes anything that already arrived) or *Discard*.
 
-### 12.5 File formats and export
+### 12.5 Export
 
 All exports are written atomically through the durable writer. Scope can be: whole board, current selection, or one frame.
 
@@ -438,23 +435,6 @@ All exports are written atomically through the durable writer. Scope can be: who
 | **JPEG** | same, quality 90 | no transparency; background filled |
 | **SVG** | `QSvgGenerator` | vector; text kept as text; images embedded as base64 |
 | **PDF** | `QPdfWriter` | vector; page = fit to content, or A4/A3 landscape; option **each frame as one page** |
-| **`.lanvas`** | `common/fileformat.py` | native, lossless, re-openable; see below |
-
-**`.lanvas` file (version 2)**
-```
-gzip( canonical JSON {
-  "format": "lanvas", "version": 2,
-  "room_name": "Sprint-1", "seq": 1234, "saved_at": "UTC ISO-8601",
-  "saved_by": { "name": "Alice", "fingerprint": "7F3A-91C2…" , "pubkey": "…" },
-  "board": { …canonical… },
-  "room_chat": [ … ]?,                       # optional, room channel only; DMs are never exported
-  "board_hash": "sha256:…",
-  "signature": "Ed25519 over canonical JSON of every field above except signature"
-})
-```
-- **Integrity:** on open, the client checks `board_hash`, then the signature, and shows "Signed by Alice (7F3A-91C2)" or a warning "File was modified or is unsigned" (opening is still allowed, read-only until the user confirms).
-- **Optional encryption** (Save a copy… → "Protect with password"): the gzip payload is encrypted with **AES-256-GCM**; key from **scrypt** (n=2^15, r=8, p=1, random 16-byte salt). Encrypted wrapper: `{"format":"lanvas-enc","version":2,"kdf":"scrypt",…,"salt","nonce","ciphertext"}`. A wrong password or tampering fails the GCM tag check cleanly.
-- `.lanvas` is also the format of local backups, recovery exports, and "create room from file".
 
 ## 13. Testing strategy
 
@@ -469,7 +449,7 @@ gzip( canonical JSON {
 | Undo conflict cases | §5.5 behavior |
 | Reconnect and server restart | Recovery |
 | Crash and corruption injection | Durable writer and integrity scan |
-| Export round trips | Every format opens; `.lanvas` hash survives save/load |
+| Export round trips | Every supported export opens and renders the board |
 | Chaos soak | Convergence under delay/duplicates |
 
 **Convergence check:** after any test, every client computes `sha256(canonical_json(board))`; all hashes must match the server's.
@@ -484,7 +464,7 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 
 | Layer | Scope | Needs | Runs |
 |---|---|---|---|
-| **L0 Unit** | Pure functions: framing, `apply_op`, fractional index, RDP, identity, ACL rules, chat validation, file format, CRC/atomic writer | nothing | every save / push |
+| **L0 Unit** | Pure functions: framing, `apply_op`, fractional index, RDP, identity, ACL rules, chat validation, snapshot hashing, CRC/atomic writer | nothing | every save / push |
 | **L1 Component** | Server loop and connection state machine over `socket.socketpair()` and a fake clock | nothing | every push |
 | **L2 Integration** | Real server on `127.0.0.1:0` (ephemeral port) plus headless **bot clients** over raw TCP and UDP; no Qt | one machine | every push |
 | **L3 LAN system** | Real GUI clients on **3+ physical machines**, mixed OS, internet disabled | a router/hotspot | at every phase gate that includes a GUI, plus once per working session from Phase 3 on |
@@ -597,12 +577,7 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 | SV-05 | Newest snapshot corrupted (bad SHA-256) | Falls back to the previous one + replay; hash equals pre-crash |
 | SV-06 | `acl.json` corrupted | `.bak` used; ACL intact |
 | SV-07 | Client killed with un-acked ops and unsent chat | Recovery dialog on next launch; "Rejoin and send" restores them with no duplicates |
-| SV-08 | Server unreachable on Ctrl+S | Local `.lanvas` written; pending `SAVE` sent after reconnect |
-| SV-09 | `.lanvas` byte flipped | Open shows "modified or unsigned" warning |
-| SV-10 | Encrypted `.lanvas` with wrong password / tampered ciphertext | Clean error, nothing loaded |
 | SV-11 | Owner restores a checkpoint, then undoes | Board equals checkpoint hash on all clients; undo returns previous hash |
-| SV-12 | Create a room from a `.lanvas` file | New room's board hash equals the file's `board_hash` |
-| SV-13 | Local backup rotation | Newest 20 kept per room; older removed |
 
 **Export (EX)**
 
@@ -612,7 +587,6 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 | EX-02 | JPEG | Opens; background filled |
 | EX-03 | SVG | Valid XML; opens in a browser offline; text selectable |
 | EX-04 | PDF fit-to-content and "each frame as page" | Opens; page count equals frame count; vector (not one big image) |
-| EX-05 | `.lanvas` save → open | `board_hash` identical; signature verifies |
 | EX-06 | Scope: selection / single frame | Only those objects in the output |
 | EX-07 | Export with internet disabled, bundled fonts only | Text renders with Inter, no network access |
 | EX-08 | Export a 1000-object board | Completes with progress shown; UI responsive (no freeze > 100 ms) |
@@ -661,7 +635,7 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 
 ### 14.4 Convergence check (used everywhere)
 
-`board_hash = sha256(canonical_json(sorted objects with props, z, deleted flags))`. After any L2/L3/chaos test, every client computes it and all must equal the server's. The same function produces `.lanvas` and checkpoint hashes.
+`board_hash = sha256(canonical_json(sorted objects with props, z, deleted flags))`. After any L2/L3/chaos test, every client computes it and all must equal the server's. The same function produces checkpoint and snapshot hashes.
 
 ### 14.5 When tests run
 
@@ -688,15 +662,15 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 10. B presses Ctrl+S; check the `SAVE_ACK` hash in the inspector equals every client's hash (SV-01).
 11. Kill the server process (no clean shutdown); restart; hashes, room chat and DMs must match (RC-05, CT-08).
 12. Force-quit C's client; relaunch; use the Recover dialog (SV-07).
-13. Export PNG, SVG, PDF, `.lanvas` on one machine and open each file on another OS (EX-01..EX-05).
+13. Export PNG, SVG, and PDF on one machine and open each file on another OS (EX-01..EX-04).
 14. Record any failure with the bug template (14.8).
 
 ### 14.7 Exit criteria
 
 Phase gates are defined in `Agents.md` §11. In terms of tiers:
 
-- **Tier 1 done (end of Phase 4):** L0-L2 green; FR-*, OR-01..OR-05, AC-01..AC-12, SE-*, CT-01..CT-12, DS-01..DS-08, SV-01..SV-10, RC-01..RC-07, UN-01..UN-04, EX-01, EX-05 pass; one clean L3 run on 3+ machines.
-- **Tier 2 done (end of Phase 5):** above plus UN-05, OR-06, SV-11..SV-13, EX-02..EX-08, CH-01..CH-03, PF-01..PF-06, XP-01..XP-03.
+- **Tier 1 done (end of Phase 4):** L0-L2 green; FR-*, OR-01..OR-05, AC-01..AC-12, SE-*, CT-01..CT-12, DS-01..DS-08, SV-01..SV-07, RC-01..RC-07, UN-01..UN-04, EX-01 pass; one clean L3 run on 3+ machines.
+- **Tier 2 done (end of Phase 5):** above plus UN-05, OR-06, SV-11, EX-02..EX-04, EX-06..EX-08, CH-01..CH-03, PF-01..PF-06, XP-01..XP-03.
 - **Release candidate (Phase 7):** all tests green on all demo OSes; XP-04..XP-06; fresh-machine unzip test passes offline.
 
 ### 14.8 Bug handling

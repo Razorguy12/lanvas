@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QStackedWidget
+from PyQt6.QtWidgets import QMainWindow, QStackedWidget
 
 from client import dialogs, paths
 from client.boardlist import BoardEntry
@@ -20,15 +19,6 @@ from client.request_screen import STATE_DENIED, RequestAccessPage
 from client.session import Session
 from client.widgets import ToastHost
 from common import durable
-from common.fileformat import (
-    FileError,
-    LanvasFile,
-    PasswordRequired,
-    WrongPassword,
-    build_document,
-    decode_lanvas,
-    encode_lanvas,
-)
 from common.identity import Identity
 from common.protocol import UDP_PORT, ErrorCode
 
@@ -81,7 +71,6 @@ class AppWindow(QMainWindow, ToastHost):
         self.launcher.join_board.connect(self.join_board)
         self.launcher.join_by_address.connect(self.join_by_address)
         self.launcher.create_room.connect(self.create_room)
-        self.launcher.open_file.connect(self.open_file)
         self.launcher.refresh.connect(self.discovery.refresh)
         self.launcher.recover.connect(self.recover)
         self.launcher.name_changed.connect(self._name_changed)
@@ -183,7 +172,6 @@ class AppWindow(QMainWindow, ToastHost):
         self.board.boards = self.boards
         self.board.leave_requested.connect(self.leave)
         self.board.switch_requested.connect(self.join_board)
-        self.board.open_file_requested.connect(self.open_file)
         self.stack.addWidget(self.board)
         self.net.start()
         QTimer.singleShot(CONNECT_GIVE_UP_MS, lambda s=session: self._connect_timed_out(s))
@@ -328,8 +316,6 @@ class AppWindow(QMainWindow, ToastHost):
         if dialog.choice == dialogs.RecoverDialog.RECOVER:
             self.adopting = crashed
             self.connect_to(crashed.host, crashed.port, {"room_id": crashed.room_id})
-        elif dialog.choice == dialogs.RecoverDialog.SAVE:
-            self._save_recovered(crashed)
         elif dialog.choice == dialogs.RecoverDialog.DISCARD:
             self._discard(crashed)
 
@@ -337,68 +323,6 @@ class AppWindow(QMainWindow, ToastHost):
         discard_crashed(crashed)
         self.crashed = [c for c in self.crashed if c is not crashed]
         self._show_recovery_banner()
-
-    def _save_recovered(self, crashed: CrashedSession) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save recovered board",
-            f"{crashed.room_name or 'recovered'}.lanvas",
-            "LANvas board (*.lanvas)",
-        )
-        if not path:
-            return
-        document = build_document(
-            crashed.board,
-            crashed.room_name,
-            crashed.seq,
-            "recovered",
-            self.identity,
-            self.launcher.username(),
-        )
-        try:
-            durable.atomic_write(Path(path), encode_lanvas(document))
-        except OSError as exc:
-            QMessageBox.warning(self, "Save failed", str(exc))
-            return
-        self._discard(crashed)
-
-    # ------------------------------------------------------------------ files
-    def open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open", "", "LANvas board (*.lanvas)")
-        if path:
-            self.open_path(Path(path))
-
-    def open_path(self, path: Path) -> LanvasFile | None:
-        loaded = self.read_file(path)
-        if loaded is None:
-            return None
-        dialog = dialogs.OpenFileDialog(loaded, self)
-        if dialog.exec() and dialog.choice == dialogs.OpenFileDialog.CREATE_ROOM:
-            objects = list(loaded.board.get("objects", {}).values())
-            self.create_room(loaded.room_name, objects)
-        return loaded
-
-    def read_file(self, path: Path) -> LanvasFile | None:
-        try:
-            raw = path.read_bytes()
-        except OSError as exc:
-            QMessageBox.warning(self, "Open", f"Could not read the file: {exc}")
-            return None
-        password: str | None = None
-        while True:
-            try:
-                return decode_lanvas(raw, password)
-            except PasswordRequired:
-                password = dialogs.ask_password(self, "This file is protected. Password:")
-                if password is None:
-                    return None
-            except WrongPassword as exc:
-                password = dialogs.ask_password(self, f"{exc} Try again:")
-                if password is None:
-                    return None
-            except FileError as exc:
-                QMessageBox.warning(self, "Open", f"⚠ This file was modified or is damaged. {exc}")
-                return None
 
     # ------------------------------------------------------------------ window
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 (Qt override)

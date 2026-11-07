@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from common import durable
-from common.fileformat import board_hash
 from common.identity import Identity, b64, unb64
 from common.model import Board, apply_op
 from common.protocol import MAX_SERVER_FRAME, FrameDecoder, MsgType, encode_frame
+from common.snapshot import board_hash
 
 
 class SimulatedCrash(BaseException):

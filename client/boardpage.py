@@ -29,7 +29,6 @@ from PyQt6.QtWidgets import (
 from client import dialogs, icons, theme
 from client.boardlist import BoardEntry
 from client.canvas.view import CanvasView
-from client.export.lanvas import export_lanvas
 from client.export.pdf import export_pdf
 from client.export.png import export_raster, raster_size
 from client.export.renderer import (
@@ -42,7 +41,6 @@ from client.export.renderer import (
 from client.export.svg import export_svg
 from client.panels.access import AccessDialog
 from client.panels.chat import ChatPanel
-from client.panels.comments import CommentsPanel
 from client.panels.design import DesignPanel
 from client.panels.inspector import InspectorPanel
 from client.panels.layers import LayersPanel
@@ -52,7 +50,7 @@ from client.session import (
     SAVE_EDITED,
     SAVE_FAILED,
     SAVE_IDLE,
-    SAVE_LOCAL_ONLY,
+    SAVE_PENDING,
     SAVE_SAVED,
     SAVE_SAVING,
 )
@@ -74,7 +72,6 @@ TOOLS = (
     ("eraser", "eraser", "Eraser (E)", "E"),
     ("text", "text", "Text (T)", "T"),
     ("sticky", "sticky", "Sticky note (S)", "S"),
-    ("comment", "comment", "Comment (C)", "C"),
 )
 ALIGN_KEYS = (
     ("Alt+A", "left"),
@@ -157,7 +154,6 @@ class Exporter(QObject):
 class BoardPage(QWidget):
     leave_requested = pyqtSignal()
     switch_requested = pyqtSignal(object, str)
-    open_file_requested = pyqtSignal()
 
     def __init__(self, session: Any, get_core: Callable[[], Any], discovery: Any) -> None:
         super().__init__()
@@ -172,7 +168,6 @@ class BoardPage(QWidget):
         self.exporter = Exporter(self, self.io)
         self.exporter.finished.connect(self._export_finished, Qt.ConnectionType.QueuedConnection)
         self.canvas = CanvasView(session, self)
-        self.canvas.comment_requested.connect(self._open_comment)
         self.tool_buttons: dict[str, QToolButton] = {}
         self._build()
         self._bind_shortcuts()
@@ -321,12 +316,10 @@ class BoardPage(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("rightpanel")
         self.design = DesignPanel(self.canvas, self.export_selection)
-        self.comments = CommentsPanel(self.canvas)
         self.chat = ChatPanel(self.session)
         self.chat.unread_changed.connect(self._update_chat_badge)
         self.chat.new_private.connect(self.new_private_message)
         self.tabs.addTab(self.design, "Design")
-        self.tabs.addTab(self.comments, "Comments")
         self.tabs.addTab(self.chat, "Chat")
         self.tabs.currentChanged.connect(self._tab_changed)
         return self.tabs
@@ -372,8 +365,6 @@ class BoardPage(QWidget):
         bind("Ctrl+Z", self.session.undo)
         bind("Ctrl+Shift+Z", self.session.redo)
         bind("Ctrl+S", self.save)
-        bind("Ctrl+Shift+S", self.save_copy)
-        bind("Ctrl+O", self.open_file_requested.emit)
         bind("Ctrl+Shift+E", self.export)
         bind("Ctrl+Shift+C", self.focus_chat)
         bind("Ctrl+Shift+M", self.new_private_message)
@@ -415,7 +406,6 @@ class BoardPage(QWidget):
         self.canvas.sync(None)
         self.layers.refresh()
         self.design.refresh()
-        self.comments.refresh()
         self.chat.refresh(scroll_bottom=True)
         self.apply_role()
         self._refresh_people()
@@ -429,7 +419,6 @@ class BoardPage(QWidget):
         self.canvas.sync(changed)
         self.layers.schedule_refresh()
         self.design.refresh()
-        self.comments.refresh()
         self._status_refresh()
 
     def _ev_transient(self, msg: dict[str, Any]) -> None:
@@ -615,7 +604,7 @@ class BoardPage(QWidget):
         self.dot.setToolTip(text)
         self.conn_label.setText(text)
         self.seq_label.setText(f"seq {session.doc.seq}")
-        count = sum(1 for o in session.doc.view.live() if o["type"] != "comment")
+        count = len(session.doc.view.live())
         self.objects_label.setText(f"{count} objects")
         if self.hash_label.isVisible():
             self.hash_label.setText(session.doc.hash()[:23])
@@ -630,8 +619,8 @@ class BoardPage(QWidget):
         elif state == SAVE_SAVED:
             when = time.strftime("%H:%M", time.localtime(info.get("time", time.time())))
             text, color = f"✓ Saved · {when}", t.success
-        elif state == SAVE_LOCAL_ONLY:
-            text, color = "Saved locally · server checkpoint pending", t.warn
+        elif state == SAVE_PENDING:
+            text, color = "Server checkpoint pending", t.warn
         elif state == SAVE_FAILED:
             text, color = f"Save failed: {info.get('error', 'unknown')}", t.danger
         elif state == SAVE_EDITED:
@@ -646,8 +635,6 @@ class BoardPage(QWidget):
             tips.append(f"Checkpoint at seq {info['seq']}")
         if "board_hash" in info:
             tips.append(f"Board hash {info['board_hash'][:23]}")
-        if "local_path" in info:
-            tips.append(f"Local copy: {info['local_path']}")
         self.save_chip.setToolTip("\n".join(tips))
 
     def _save_chip_clicked(self) -> None:
@@ -740,15 +727,9 @@ class BoardPage(QWidget):
         self.access_dialog = None
         self._update_share_badge()
 
-    def _open_comment(self, obj_id: str) -> None:
-        self.tabs.setCurrentWidget(self.comments)
-        self.comments.open_comment(obj_id)
-
     def _open_room_menu(self) -> None:
         menu = QMenu(self)
         menu.addAction("Save\tCtrl+S", self.save)
-        menu.addAction("Save a copy…\tCtrl+Shift+S", self.save_copy)
-        menu.addAction("Open .lanvas…\tCtrl+O", self.open_file_requested.emit)
         menu.addAction("Export…\tCtrl+Shift+E", self.export)
         history = menu.addAction("Version history", self.version_history)
         if self.session.role != "owner":
@@ -825,38 +806,6 @@ class BoardPage(QWidget):
     def save(self) -> None:
         self.session.save()
 
-    def _default_name(self, suffix: str) -> str:
-        safe = "".join(
-            c for c in self.session.room.get("name", "board") if c.isalnum() or c in " -_"
-        )
-        return f"{safe.strip() or 'board'}{suffix}"
-
-    def save_copy(self) -> None:
-        if not self.session.can_export():
-            self.toast("Viewers can't save copies in this room.")
-            return
-        options = dialogs.SaveCopyDialog(self)
-        if not options.exec():
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save a copy", self._default_name(".lanvas"), "LANvas board (*.lanvas)"
-        )
-        if path:
-            self._write_lanvas(path, options.include_chat.isChecked(), options.password())
-
-    def _write_lanvas(self, path: str, include_chat: bool, password: str | None) -> None:
-        document = self.session.export_document(include_chat)
-        target = Path(path)
-
-        def job() -> None:
-            try:
-                durable.atomic_write(target, export_lanvas(document, password))
-                self.exporter.finished.emit(str(target), "")
-            except OSError as exc:
-                self.exporter.finished.emit(str(target), str(exc))
-
-        self.io.submit(job)
-
     def export_selection(self) -> None:
         self.export(default_selection=True)
 
@@ -874,7 +823,7 @@ class BoardPage(QWidget):
         def estimate(dialog: dialogs.ExportDialog) -> str:
             fmt = dialog.format_name()
             if fmt not in ("PNG", "JPEG"):
-                return "Vector output; size depends on content." if fmt != ".lanvas" else ""
+                return "Vector output; size depends on content."
             width, height = raster_size(scene, self._scope_from(dialog), dialog.scale.currentData())
             megabytes = width * height * ESTIMATE_BYTES_PER_PIXEL / 1e6
             return f"Estimated size: {width} × {height} px · ~{megabytes:.1f} MB"
@@ -899,17 +848,12 @@ class BoardPage(QWidget):
             "JPEG": ("JPEG image (*.jpg)", ".jpg"),
             "SVG": ("SVG image (*.svg)", ".svg"),
             "PDF": ("PDF document (*.pdf)", ".pdf"),
-            ".lanvas": ("LANvas board (*.lanvas)", ".lanvas"),
         }
         file_filter, suffix = filters[fmt]
         path, _ = QFileDialog.getSaveFileName(
             self, "Export", self._default_name(suffix), file_filter
         )
         if not path:
-            return
-        if fmt == ".lanvas":
-            password = dialog.fields.password() if dialog.protect.isChecked() else None
-            self._write_lanvas(path, dialog.include_chat.isChecked(), password)
             return
         scene = self.canvas.board_scene
         scope = self._scope_from(dialog)
