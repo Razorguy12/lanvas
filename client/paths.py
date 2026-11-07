@@ -39,9 +39,5 @@ def settings_file() -> Path:
     return app_dir() / "settings.json"
 
 
-def backups_dir(room_id: str) -> Path:
-    return app_dir() / "backups" / room_id
-
-
 def journal_dir() -> Path:
     return app_dir() / "journal"

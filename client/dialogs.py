@@ -5,17 +5,14 @@ from __future__ import annotations
 import secrets
 from typing import Any
 
-from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QPainter
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
-    QGraphicsView,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -29,13 +26,8 @@ from PyQt6.QtWidgets import (
 )
 
 from client import icons, theme
-from client.canvas.scene import BoardScene
-from common.fileformat import LanvasFile, Trust
 from common.identity import short_fingerprint
-from common.model import Board
 from common.protocol import TCP_PORT
-
-MIN_PASSWORD_HINT = 10
 
 
 class JoinByAddressDialog(QDialog):
@@ -166,7 +158,7 @@ class AccessRequestDialog(QDialog):
 
 
 class RecoverDialog(QDialog):
-    RECOVER, SAVE, DISCARD = 1, 2, 3
+    RECOVER, DISCARD = 1, 2
 
     def __init__(self, crashed: Any, parent: Any = None) -> None:
         super().__init__(parent)
@@ -189,9 +181,6 @@ class RecoverDialog(QDialog):
         discard.clicked.connect(lambda: self._done(self.DISCARD))
         row.addWidget(discard)
         row.addStretch(1)
-        save = QPushButton("Save recovered board as .lanvas…")
-        save.clicked.connect(lambda: self._done(self.SAVE))
-        row.addWidget(save)
         rejoin = QPushButton("Rejoin and send my changes")
         rejoin.setObjectName("primary")
         rejoin.setDefault(True)
@@ -204,138 +193,7 @@ class RecoverDialog(QDialog):
         self.accept()
 
 
-def trust_text(loaded: LanvasFile) -> tuple[str, str]:
-    """(message, color token) for the header shown before anything else about a file."""
-    t = theme.current()
-    if loaded.trust is Trust.SIGNED:
-        name = loaded.saved_by.get("name", "?")
-        code = short_fingerprint(loaded.saved_by.get("fingerprint", ""))
-        return f"✓ Signed by {name} ({code})", t.success
-    return "⚠ This file was modified or is unsigned", t.warn
-
-
-class OpenFileDialog(QDialog):
-    """A read-only preview with its trust verdict on top, and the way to make a room from it."""
-
-    VIEW, CREATE_ROOM = 1, 2
-
-    def __init__(self, loaded: LanvasFile, parent: Any = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(f"{loaded.room_name}.lanvas")
-        self.resize(760, 560)
-        self.choice = 0
-        layout = QVBoxLayout(self)
-        message, color = trust_text(loaded)
-        banner = QLabel(message)
-        banner.setTextFormat(Qt.TextFormat.PlainText)
-        banner.setStyleSheet(f"color:{color}; font-weight:600;")
-        layout.addWidget(banner)
-        meta = QLabel(f"{loaded.room_name} · saved {loaded.saved_at} · version {loaded.seq}")
-        meta.setTextFormat(Qt.TextFormat.PlainText)
-        meta.setObjectName("muted")
-        layout.addWidget(meta)
-        self.scene = BoardScene(self)
-        self.scene.sync(Board.from_json(loaded.board))
-        view = QGraphicsView(self.scene)
-        view.setRenderHints(QPainter.RenderHint.Antialiasing)
-        view.setBackgroundBrush(_canvas_brush())
-        self.view = view
-        layout.addWidget(view, 1)
-        if loaded.trust is not Trust.SIGNED:
-            warn = QLabel(
-                "Opened read-only. Only make a room from this if you trust where it came from."
-            )
-            warn.setObjectName("muted")
-            layout.addWidget(warn)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        cancel = QPushButton("Close")
-        cancel.clicked.connect(self.reject)
-        row.addWidget(cancel)
-        create = QPushButton("Create room from this file…")
-        create.setObjectName("primary")
-        create.clicked.connect(self._create)
-        row.addWidget(create)
-        layout.addLayout(row)
-
-    def showEvent(self, event: Any) -> None:  # noqa: N802 (Qt override)
-        rect: QRectF = self.scene.content_rect()
-        if not rect.isNull():
-            self.view.fitInView(rect.adjusted(-30, -30, 30, 30), Qt.AspectRatioMode.KeepAspectRatio)
-
-    def _create(self) -> None:
-        self.choice = self.CREATE_ROOM
-        self.accept()
-
-
-def _canvas_brush() -> Any:
-    from PyQt6.QtGui import QBrush, QColor
-
-    return QBrush(QColor(theme.current().bg_canvas))
-
-
-def ask_password(parent: Any, label: str = "Password") -> str | None:
-    text, ok = QInputDialog.getText(parent, "Password", label, QLineEdit.EchoMode.Password)
-    return text if ok else None
-
-
-class PasswordFields(QWidget):
-    """Password + confirm with a strength hint, used wherever a file can be protected."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        form = QFormLayout(self)
-        form.setContentsMargins(0, 0, 0, 0)
-        self.first = QLineEdit()
-        self.first.setEchoMode(QLineEdit.EchoMode.Password)
-        self.second = QLineEdit()
-        self.second.setEchoMode(QLineEdit.EchoMode.Password)
-        self.hint = QLabel()
-        self.hint.setObjectName("muted")
-        self.hint.setWordWrap(True)
-        form.addRow("Password", self.first)
-        form.addRow("Confirm", self.second)
-        form.addRow(self.hint)
-        self.first.textChanged.connect(self._update)
-        self.second.textChanged.connect(self._update)
-        self._update()
-
-    def _update(self) -> None:
-        strength = (
-            "Longer is stronger." if len(self.first.text()) < MIN_PASSWORD_HINT else "Good length."
-        )
-        self.hint.setText(f"{strength} If you forget it, the file cannot be opened.")
-
-    def valid(self) -> bool:
-        return bool(self.first.text()) and self.first.text() == self.second.text()
-
-    def password(self) -> str:
-        return self.first.text()
-
-
-class SaveCopyDialog(QDialog):
-    def __init__(self, parent: Any = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Save a copy")
-        layout = QVBoxLayout(self)
-        self.include_chat = QCheckBox("Include room chat (private messages are never included)")
-        layout.addWidget(self.include_chat)
-        self.protect = QCheckBox("Protect with password")
-        layout.addWidget(self.protect)
-        self.fields = PasswordFields()
-        self.fields.setVisible(False)
-        self.protect.toggled.connect(self.fields.setVisible)
-        layout.addWidget(self.fields)
-        layout.addLayout(_ok_cancel(self, "Choose location…", self._try_accept))
-
-    def _try_accept(self) -> None:
-        if self.protect.isChecked() and not self.fields.valid():
-            QMessageBox.warning(self, "Password", "The two passwords need to match.")
-            return
-        self.accept()
-
-    def password(self) -> str | None:
-        return self.fields.password() if self.protect.isChecked() else None
+FORMATS = ("PNG", "JPEG", "SVG", "PDF")
 
 
 def _ok_cancel(dialog: QDialog, ok_text: str, on_ok: Any) -> QHBoxLayout:
@@ -352,9 +210,6 @@ def _ok_cancel(dialog: QDialog, ok_text: str, on_ok: Any) -> QHBoxLayout:
     return row
 
 
-FORMATS = ("PNG", "JPEG", "SVG", "PDF", ".lanvas")
-
-
 class ExportDialog(QDialog):
     """Only the options relevant to the chosen format are enabled (Design.md section 8.4)."""
 
@@ -363,7 +218,6 @@ class ExportDialog(QDialog):
         frames: list[tuple[str, str]],
         has_selection: bool,
         estimate: Any,
-        allow_lanvas: bool = True,
         parent: Any = None,
     ) -> None:
         super().__init__(parent)
@@ -416,17 +270,6 @@ class ExportDialog(QDialog):
         row.addWidget(self.each_frame)
         form.addRow("PDF", row)
 
-        self.include_chat = QCheckBox("Include room chat")
-        self.protect = QCheckBox("Protect with password")
-        row = QHBoxLayout()
-        row.addWidget(self.include_chat)
-        row.addWidget(self.protect)
-        form.addRow(".lanvas", row)
-        self.fields = PasswordFields()
-        self.fields.setVisible(False)
-        self.protect.toggled.connect(self._protect_toggled)
-        form.addRow(self.fields)
-
         self.estimate_label = QLabel()
         self.estimate_label.setObjectName("muted")
         form.addRow(self.estimate_label)
@@ -441,13 +284,7 @@ class ExportDialog(QDialog):
             signal.connect(self._refresh)
         self.scale.currentIndexChanged.connect(self._refresh)
         self.frame_combo.currentIndexChanged.connect(self._refresh)
-        for button in self.format_group.buttons():
-            button.setEnabled(button.text() != ".lanvas" or allow_lanvas)
         self._refresh()
-
-    def _protect_toggled(self, on: bool) -> None:
-        self.fields.setVisible(on)
-        self.adjustSize()
 
     def format_name(self) -> str:
         return self.format_group.checkedButton().text()
@@ -459,11 +296,8 @@ class ExportDialog(QDialog):
         self.transparent.setEnabled(fmt == "PNG")
         self.page.setEnabled(fmt == "PDF")
         self.each_frame.setEnabled(fmt == "PDF" and self.frame_combo.count() > 0)
-        native = fmt == ".lanvas"
-        self.include_chat.setEnabled(native)
-        self.protect.setEnabled(native)
         for widget in (self.scope_board, self.scope_selection, self.scope_frame, self.frame_combo):
-            widget.setEnabled(not native and self._scope_usable(widget))
+            widget.setEnabled(self._scope_usable(widget))
         self.estimate_label.setText(self.estimate(self) if callable(self.estimate) else "")
 
     def _scope_usable(self, widget: QWidget) -> bool:
@@ -474,9 +308,6 @@ class ExportDialog(QDialog):
         return True
 
     def _try_accept(self) -> None:
-        if self.protect.isChecked() and self.protect.isEnabled() and not self.fields.valid():
-            QMessageBox.warning(self, "Password", "The two passwords need to match.")
-            return
         self.accept()
 
 

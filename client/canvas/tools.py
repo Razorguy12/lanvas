@@ -34,10 +34,9 @@ def object_transform(obj: dict[str, Any]) -> QTransform:
     center = rect.center()
     transform = QTransform()
     transform.translate(props.get("x", 0), props.get("y", 0))
-    if obj["type"] != "comment":
-        transform.translate(center.x(), center.y())
-        transform.rotate(props.get("rotation", 0))
-        transform.translate(-center.x(), -center.y())
+    transform.translate(center.x(), center.y())
+    transform.rotate(props.get("rotation", 0))
+    transform.translate(-center.x(), -center.y())
     return transform
 
 
@@ -376,8 +375,6 @@ class SelectTool(Tool):
         item = self.c.board_scene.item_at(pos)
         if item is not None and item.obj["type"] in ("text", "sticky") and self.c.can_edit():
             self.c.edit_text(item.obj_id)
-        elif item is not None and item.obj["type"] == "comment":
-            self.c.open_comment(item.obj_id)
 
     def overlay(self, painter: Any) -> None:
         if self.marquee is not None:
@@ -688,12 +685,4 @@ class StickyTool(Tool):
         if op:
             self.c.set_selection({op["id"]})
             self.c.edit_text(op["id"], new_object=True)
-        self.c.select_tool_after_create()
-
-
-class CommentTool(Tool):
-    name = "comment"
-
-    def press(self, pos: QPointF, event: Any) -> None:
-        self.c.create_comment(pos)
         self.c.select_tool_after_create()

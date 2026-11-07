@@ -1,4 +1,4 @@
-"""Client crash recovery: the journal, the session lock, and backups (Architecture.md section 12.4).
+"""Client crash recovery: the journal and session lock (Architecture.md section 12.4).
 
 While a board is open, the journal holds the last confirmed board plus an append log of un-acked ops
 and unsent chat. ``session-<pid>.lock`` exists for exactly as long as the client runs, so a lock
@@ -30,14 +30,13 @@ from common.durable import (  # noqa: F401  (the "mirror" of server/persist.py n
     scan_log,
     truncate_log,
 )
-from common.fileformat import decode_snapshot, encode_snapshot
 from common.model import Board
+from common.snapshot import decode_snapshot, encode_snapshot
 
 log = logging.getLogger(__name__)
 
 JOURNAL_EVERY_SECONDS = 30.0
 JOURNAL_EVERY_OPS = 200
-KEEP_BACKUPS = 20
 
 E_OP_ADD = "op+"
 E_OP_DONE = "op-"
@@ -235,10 +234,3 @@ def find_crashed(root: Path) -> list[CrashedSession]:
 
 def discard_crashed(session: CrashedSession) -> None:
     shutil.rmtree(session.directory, ignore_errors=True)
-
-
-def rotate_backups(directory: Path, keep: int = KEEP_BACKUPS) -> None:
-    """Keep the newest ``keep`` local backups. Names sort by time because they start with one."""
-    files = sorted(directory.glob("*.lanvas"))
-    for old in files[:-keep]:
-        old.unlink(missing_ok=True)

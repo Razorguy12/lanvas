@@ -77,8 +77,6 @@ class LayersPanel(QWidget):
         depth: dict[str, int] = {}
         board = self.canvas.doc().view
         for obj in reversed(board.live()):
-            if obj["type"] == "comment":
-                continue
             level = 0
             parent = obj.get("parent")
             while parent and level < 8:

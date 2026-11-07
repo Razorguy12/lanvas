@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from common.fileformat import board_hash, decode_snapshot, encode_snapshot
 from common.model import Board
+from common.snapshot import board_hash, decode_snapshot, encode_snapshot
 from server.persist import (
     KEEP_SNAPSHOTS,
     AppendLog,

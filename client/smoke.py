@@ -15,13 +15,12 @@ from PyQt6.QtCore import QEventLoop
 from PyQt6.QtGui import QFontDatabase, QImage
 from PyQt6.QtWidgets import QApplication
 
-from client import paths, theme
+from client import theme
 from client.app import AppWindow
 from client.export.pdf import export_pdf
 from client.export.png import export_raster
 from client.export.renderer import Scope, drive
 from client.export.svg import export_svg
-from common.fileformat import Trust, decode_lanvas
 
 
 def _spin(app: QApplication, done: Callable[[], object], timeout: float = 10.0) -> bool:
@@ -60,12 +59,6 @@ def run(app: QApplication, host: str, port: int, out_dir: Path, udp_port: int) -
     session.save()
     _step(_spin(app, lambda: session.save_state == "saved"), "Ctrl+S checkpoint acknowledged")
     _step(session.save_info["board_hash"] == session.doc.hash(), "board hash matches server")
-    session.io.flush()
-    backups = list(paths.backups_dir(session.room_id or "").glob("*.lanvas"))
-    _step(
-        backups and decode_lanvas(backups[0].read_bytes()).trust is Trust.SIGNED,
-        "signed local copy verifies",
-    )
     assert window.board is not None
     scene = window.board.canvas.board_scene
     png = drive(export_raster(scene, Scope()))

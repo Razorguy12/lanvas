@@ -24,8 +24,7 @@
 │Tool  │ Left panel    │                                           │ Right     │
 │rail  │ • Layers      │              CANVAS                       │ panel     │
 │(v)   │ • Pages/Frames│        (infinite, zoom/pan)               │ • Design  │
-│      │               │                                           │ • Comments│
-│      │               │                                           │ • Chat    │
+│      │               │                                           │      │               │                                           │ • Chat    │
 ├──────┴───────────────┴───────────────────────────────────────────┴───────────┤
 │ Status bar: role • connection • RTT • seq • objects • save state ("Saved 21:47")│
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -33,7 +32,7 @@
 
 - Panels are collapsible (`Ctrl+\` toggles all UI, as in Figma).
 - Floating **bottom-center toolbar** is optional; default is the vertical left tool rail for simplicity of implementation.
-- The **≡ Room name ▾** menu contains: Save (`Ctrl+S`), Save a copy… (`Ctrl+Shift+S`), Open `.lanvas`…, Export… (`Ctrl+Shift+E`), Version history, **Switch board ▸** (live list of other boards on the network), Leave room.
+- The **≡ Room name ▾** menu contains: Save (`Ctrl+S`), Export… (`Ctrl+Shift+E`), Version history, **Switch board ▸** (live list of other boards on the network), Leave room.
 
 ## 3. Tokens
 
@@ -68,7 +67,7 @@ Each user color is used for their cursor, name tag, selection outline, and chat 
 - Popovers: 1 px border plus soft shadow (`0 4px 16px rgba(0,0,0,.18)`).
 
 ### 3.4 Iconography
-Monochrome line icons (Lucide or Phosphor SVG set, bundled), 16 px, 1.5 px stroke. Use `QSvgRenderer`. Lock icon marks private conversations; shield-check marks signed files.
+Monochrome line icons (Lucide or Phosphor SVG set, bundled), 16 px, 1.5 px stroke. Use `QSvgRenderer`. Lock icon marks private conversations.
 
 ## 4. Tools and shortcuts
 
@@ -83,17 +82,14 @@ Monochrome line icons (Lucide or Phosphor SVG set, bundled), 16 px, 1.5 px strok
 | **Eraser** | `E` | deletes whole strokes under cursor |
 | Text | `T` | click to type; double-click to edit |
 | Sticky | `S` | |
-| Comment | `C` | pin comment, threads |
 | Hand | `Space` (hold) | pan |
 | Zoom | `Ctrl+scroll`, `Ctrl+0` (100%), `Shift+1` (fit) | |
 | Undo / Redo | `Ctrl+Z` / `Ctrl+Shift+Z` | per-user |
 | Duplicate / Group / Delete | `Ctrl+D` / `Ctrl+G` / `Del` | |
 | Bring forward / back | `Ctrl+]` / `Ctrl+[` | |
 | Align | `Alt+A/D/W/S/H/V` | left/right/top/bottom/centers |
-| **Save** | `Ctrl+S` | server checkpoint + signed local copy |
-| **Save a copy…** | `Ctrl+Shift+S` | `.lanvas` to a chosen location, optional password |
-| **Open `.lanvas`** | `Ctrl+O` | view, or create a room from it (owner) |
-| **Export…** | `Ctrl+Shift+E` | PNG, JPEG, SVG, PDF, `.lanvas` |
+| **Save** | `Ctrl+S` | server checkpoint |
+| **Export…** | `Ctrl+Shift+E` | PNG, JPEG, SVG, PDF |
 | Chat / new private message | `Ctrl+Shift+C` / `Ctrl+Shift+M` | focus chat input / pick a member |
 | Toggle UI | `Ctrl+\` | |
 
@@ -144,9 +140,6 @@ Contextual sections: Position & size (X, Y, W, H, rotation), Fill, Stroke, Opaci
 - **Roles:** viewers can read and, if not muted, send room messages and private messages. Muted users see the input disabled with "The owner has muted you in this room."
 - **Owner extras** (⋯ menu on the room channel): Clear room chat (confirm dialog), Chat retention (Forever / Last N messages / Last N days).
 
-### Comments
-Pins on canvas; thread list in panel; resolve toggle.
-
 ### Users and Access
 Avatar stack in the top bar (initial letters on user color). Click opens the **People popover**: list with role badges, connection state, **Message** (opens a private conversation), "Following" option, and (owner only) role dropdown, kick, mute.
 
@@ -165,7 +158,7 @@ Dialog: name, IP, fingerprint short code (e.g. `7F3A-91C2`), buttons **Approve a
 - Room name, room code (copy), LAN address(es) (copy), **Discoverable on this network** toggle (off = hidden), "Require room code to request access", "Show member count in discovery".
 - **Create invite** (role, expiry, single-use), shown as a short code.
 - Member table: role dropdown, Mute, Revoke, Kick.
-- Room settings: lock board (read-only for all but owner), "Editors can clear canvas", "Viewers can export and save copies", "Editors can approve requests" (optional).
+- Room settings: lock board (read-only for all but owner), "Editors can clear canvas", "Viewers can export", "Editors can approve requests" (optional).
 
 ### 7.4 Role indicators
 Status bar chip: `OWNER`, `EDITOR`, `VIEWER` with distinct colors. Role changes show a toast ("You are now an editor").
@@ -184,7 +177,7 @@ Status bar chip: `OWNER`, `EDITOR`, `VIEWER` with distinct colors. Role changes 
 │ │ OS-Assignment   Ravi-Laptop        —          🔒 approval   [Join]│
 │ │ Retro (needs update)  v1 server    —          —            (greyed)│
 │ └───────────────────────────────────────────────────────────────┘ │
-│ Join by address…   Create room…   Open .lanvas…                   │
+│ Join by address…   Create room…                                   │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -197,24 +190,22 @@ Status bar chip: `OWNER`, `EDITOR`, `VIEWER` with distinct colors. Role changes 
 - **Recover banner:** if the last session crashed, a banner at the top opens the Recover dialog (§8.6).
 
 ### 8.2 Create room
-Name, code (auto-generated, editable), discoverable toggle (default on), "Start from a `.lanvas` file…" (optional).
+Name, code (auto-generated, editable), discoverable toggle (default on).
 
 ### 8.3 Save (Ctrl+S) and save state
 
-- `Ctrl+S` gives immediate feedback in the status bar: `Saving…` (spinner) → `Saved · 21:47` (green check, tooltip: checkpoint seq, board hash, local copy path) or `Saved locally · server checkpoint pending` (amber) or `Save failed: <reason>` (red, click to retry).
+- `Ctrl+S` gives immediate feedback in the status bar: `Saving…` (spinner) → `Saved · 21:47` (green check, tooltip: checkpoint seq and board hash), `Server checkpoint pending` (amber), or `Save failed: <reason>` (red, click to retry).
 - Between saves, the status bar shows `Edited since last save` in muted text. No modal dialogs on Ctrl+S.
-- Viewers without export permission: toast "Viewers can't save copies in this room."
-- **Save a copy… (`Ctrl+Shift+S`)**: native file dialog plus options: include room chat (off by default; private messages are never included), **Protect with password** (password + confirm, strength hint, "If you forget it, the file cannot be opened").
+- Viewers: toast "Only editors can save a server checkpoint."
 
 ### 8.4 Export (`Ctrl+Shift+E`)
 
 ```
 ┌ Export ──────────────────────────────────────────┐
-│ Format   (•) PNG  ( ) JPEG  ( ) SVG  ( ) PDF  ( ) .lanvas │
+│ Format   (•) PNG  ( ) JPEG  ( ) SVG  ( ) PDF │
 │ What     (•) Whole board ( ) Selection ( ) Frame [▾]│
 │ PNG/JPEG scale [1x ▾]   Background (•) Canvas ( ) Transparent │
 │ PDF page  [Fit to content ▾]  [ ] Each frame as a page │
-│ .lanvas   [ ] Include room chat  [ ] Protect with password │
 │ Estimated size: 2400 × 1600 px · ~1.2 MB          │
 │                              [Cancel] [Export…]   │
 └──────────────────────────────────────────────────┘
@@ -223,11 +214,8 @@ Name, code (auto-generated, editable), discoverable toggle (default on), "Start 
 - Only options relevant to the chosen format are enabled.
 - Large exports show a progress bar; the UI stays usable. Success toast: "Exported Sprint-1.pdf · Show in folder".
 
-### 8.5 Open `.lanvas`
-Shows a trust header before anything else: `✔ Signed by Alice (7F3A-91C2)` (green) or `⚠ This file was modified or is unsigned` (amber) or a password prompt for protected files. Actions: View (read-only), Create room from this file (owner), Cancel.
-
 ### 8.6 Recover dialog (after a crash)
-"LANvas didn't close properly last time. **Sprint-1** has 14 unsaved changes and 1 unsent message." Buttons: **Rejoin and send my changes** (primary), **Save recovered board as .lanvas…**, **Discard**. After rejoining, a toast reports "14 changes recovered."
+"LANvas didn't close properly last time. **Sprint-1** has 14 unsaved changes and 1 unsent message." Buttons: **Rejoin and send my changes** (primary), **Discard**. After rejoining, a toast reports "14 changes recovered."
 
 ### 8.7 Version history (Tier 2 restore, Tier 3 timeline)
 List of checkpoints (time, author color, label, hash short code); "Restore this version" (owner, confirm dialog, undoable). Tier 3 adds the timeline slider with author-colored ticks.
@@ -296,8 +284,7 @@ List of checkpoints (time, author color, label, hash short code); "Restore this 
 | Access flow | Unapproved user, approve, deny, revoke | screens/states match §7; no board or chat before approval |
 | Network UI | Pull the cable, reconnect | amber banner, editing continues, board recovers |
 | Inspector | Pause/filter/inspect a frame; inspect another user's DM frame | decoded JSON shown, DM text hidden, no UI freeze |
-| Export | PNG/JPEG/SVG/PDF/`.lanvas`, each scope | file opens, matches canvas, no cursors in output |
-| Open file | Open a signed, a modified, and a password-protected `.lanvas` | correct trust header / password prompt |
+| Export | PNG/JPEG/SVG/PDF, each scope | file opens, matches canvas, no cursors in output |
 
 ### 13.2 Visual regression (optional, if time allows)
 Render key states offscreen (`QT_QPA_PLATFORM=offscreen`, `QWidget.grab()`): launcher (empty and with boards), request-access screen, board with 3 remote cursors, chat with a DM open, properties panel, export dialog, recover dialog, inspector. Compare to stored baselines with a small pixel tolerance; update baselines only by owner approval.

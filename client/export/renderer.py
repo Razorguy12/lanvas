@@ -48,7 +48,7 @@ def _descendant_ids(scene: BoardScene, roots: set[str]) -> set[str]:
 
 
 def collect_items(scene: BoardScene, scope: Scope) -> list[BoardItem]:
-    """Items in scope and in paint order. Comments are review notes, not part of the artwork."""
+    """Visible items in scope, in paint order."""
     if scope.kind == SCOPE_SELECTION:
         wanted = _descendant_ids(scene, set(scope.selection))
     elif scope.kind == SCOPE_FRAME and scope.frame_id:
@@ -58,7 +58,7 @@ def collect_items(scene: BoardScene, scope: Scope) -> list[BoardItem]:
     items = [
         item
         for obj_id, item in scene.items_by_id.items()
-        if obj_id in wanted and item.isVisible() and item.obj["type"] != "comment"
+        if obj_id in wanted and item.isVisible()
     ]
     items.sort(key=lambda i: i.zValue())
     return items

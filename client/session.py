@@ -12,12 +12,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from client import paths
 from client.chatmodel import ChatModel, Outgoing
 from client.document import Document, UndoResult
-from client.recovery import CrashedSession, IoWorker, Journal, rotate_backups
-from common.durable import atomic_write
-from common.fileformat import build_document, encode_lanvas
+from client.recovery import CrashedSession, Journal
 from common.identity import Identity
 from common.protocol import ErrorCode, MsgType
 
@@ -28,7 +25,7 @@ RETRY_INTERVAL = 1.0
 SAVE_IDLE = "idle"
 SAVE_SAVING = "saving"
 SAVE_SAVED = "saved"
-SAVE_LOCAL_ONLY = "local_only"
+SAVE_PENDING = "pending"
 SAVE_FAILED = "failed"
 SAVE_EDITED = "edited"
 
@@ -58,7 +55,6 @@ class Session:
         self.doc.my_fp = self.fp
         self.chat = ChatModel(self.fp)
         self.journal: Journal | None = None
-        self.io = IoWorker()
         self.role: str | None = None
         self.room: dict[str, Any] = {}
         self.room_id: str | None = None
@@ -317,7 +313,7 @@ class Session:
         return op
 
     def _note_edit(self) -> None:
-        if self.save_state in (SAVE_SAVED, SAVE_LOCAL_ONLY, SAVE_FAILED, SAVE_IDLE):
+        if self.save_state in (SAVE_SAVED, SAVE_PENDING, SAVE_FAILED, SAVE_IDLE):
             self.save_state = SAVE_EDITED
             self.emit("save_state")
 
@@ -457,51 +453,24 @@ class Session:
         return self.role in ("owner", "editor") or bool(self.settings.get("viewers_can_export"))
 
     def save(self, label: str | None = None) -> None:
-        """Ctrl+S: a server checkpoint when allowed, plus a signed local copy of the board."""
+        """Ctrl+S requests a durable server checkpoint when the current role allows it."""
         can_checkpoint = self.role in ("owner", "editor")
-        if not self.can_export() and not can_checkpoint:
-            self.emit("toast", text="Viewers can't save copies in this room.")
+        if not can_checkpoint:
+            self.emit("toast", text="Only editors can save a server checkpoint.")
             return
         self.save_state = SAVE_SAVING
         self.emit("save_state")
-        self._write_backup()
-        if not can_checkpoint:
-            self.save_state = SAVE_SAVED
-            self.save_info = {"time": self.clock()}
-            self.emit("save_state")
-            return
         self._save_label = label
         if self.live:
             self._send_save()
         else:
             self.save_pending = True  # goes out from _on_welcome after reconnecting
-            self.save_state = SAVE_LOCAL_ONLY
+            self.save_state = SAVE_PENDING
             self.emit("save_state")
 
     def _send_save(self) -> None:
         self.save_pending = False
         self.send(MsgType.SAVE, {"label": self._save_label} if self._save_label else {})
-
-    def _write_backup(self) -> None:
-        room_id = self.room_id or "unknown"
-        when = time.strftime("%Y%m%dT%H%M%S", time.gmtime(self.clock()))
-        directory = paths.backups_dir(room_id)
-        path = directory / f"{when}.lanvas"
-        doc = build_document(
-            self.doc.confirmed,
-            self.room.get("name", room_id),
-            self.doc.seq,
-            when,
-            self.identity,
-            self.username,
-        )
-        self.save_info["local_path"] = str(path)
-
-        def job() -> None:
-            atomic_write(path, encode_lanvas(doc))
-            rotate_backups(directory)
-
-        self.io.submit(job)
 
     def _on_save_ack(self, msg: dict[str, Any]) -> None:
         self.save_state = SAVE_SAVED
@@ -527,28 +496,9 @@ class Session:
             self.emit("hash_mismatch")
 
     def _on_save_reject(self, msg: dict[str, Any]) -> None:
-        code = msg.get("code", "")
-        if code == ErrorCode.NOT_ALLOWED:
-            self.save_state = SAVE_SAVED if self.can_export() else SAVE_FAILED
-        else:
-            self.save_state = SAVE_FAILED
-            self.save_info["error"] = code
+        self.save_state = SAVE_FAILED
+        self.save_info["error"] = msg.get("code", "")
         self.emit("save_state")
-
-    def export_document(self, include_chat: bool = False) -> dict[str, Any]:
-        """A signed document of the confirmed board. Private messages have no path into this."""
-        chat = None
-        if include_chat:
-            chat = [dict(m) for m in self.chat.room.messages]
-        return build_document(
-            self.doc.confirmed,
-            self.room.get("name", "Untitled"),
-            self.doc.seq,
-            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.clock())),
-            self.identity,
-            self.username,
-            room_chat=chat,
-        )
 
     # ------------------------------------------------------------------ periodic work
     def tick(self) -> None:
@@ -568,5 +518,3 @@ class Session:
         if self.journal is not None:
             self.journal.close(clean=clean)
             self.journal = None
-        self.io.flush()
-        self.io.stop()

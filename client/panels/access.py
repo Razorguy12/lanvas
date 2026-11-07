@@ -28,7 +28,7 @@ TOGGLES = (
     ("show_member_count", "Show member count in discovery"),
     ("locked", "Lock board (read-only for all but the owner)"),
     ("editors_can_clear", "Editors can clear canvas"),
-    ("viewers_can_export", "Viewers can export and save copies"),
+    ("viewers_can_export", "Viewers can export"),
 )
 EXPIRY = (("1 hour", 3600), ("1 day", 86400), ("7 days", 604800))
 

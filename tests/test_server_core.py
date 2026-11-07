@@ -11,9 +11,9 @@ import pytest
 
 from common import durable
 from common import protocol as p
-from common.fileformat import board_hash, decode_snapshot
 from common.model import MAX_TEXT
 from common.protocol import ErrorCode, MsgType
+from common.snapshot import board_hash, decode_snapshot
 from server.loop import Server, State
 from tests.harness import (
     BotClient,

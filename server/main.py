@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from common import netutil
+from common.logging_setup import configure_logging
 from common.protocol import TCP_PORT, UDP_PORT
 from server.loop import Server
 
@@ -23,9 +24,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    configure_logging(
+        args.data / "logs" / "lanvas.log",
+        console_level=logging.DEBUG if args.verbose else logging.INFO,
+        file_level=logging.DEBUG if args.verbose else logging.INFO,
         datefmt="%H:%M:%S",
     )
     startup = logging.getLogger("lanvas.summary")
