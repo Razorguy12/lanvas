@@ -23,6 +23,8 @@ capped (8 KB before login, 1 MB from clients afterward) so a bad peer can't exha
 | C→S | `hello` | `user, room` (+ optional `want` role) or `create:true, salt, key, role, private, approval` (code is always server-assigned); optional session `token` |
 | S→C | `waiting` | approval room (or an `admin` request): waiting at the door for the host/an admin |
 | S→C / C→S | `req` / `grant{user,role}` `refuse{user}` `reqdone` | access requests to the host and admins and their answers; C→S `ask{role}` = in-room request |
+| C→S→C | `pages` / C→S `page_add{name}` `page_rename{id,name}` `page_del{id}` | whiteboards in the room (add/rename: editor+, delete: admin+) |
+| C→S | `kick{user}` `ban{user, ip}` `unban{user | ip}`; S→C `bans{bans, ips}` | admin+; bans persist with the room, `ips` = members' addresses (admins only) |
 | C→S→C | `present{on,v}` `view{v}` | presentation mode (admin+): `v = {z, cx, cy}` = presenter's zoom level and view centre |
 | S→C | `challenge` | `salt, nonce` (only for password rooms) |
 | C→S | `auth` | `proof` = HMAC-SHA256(key, nonce); the password is never sent |
@@ -37,8 +39,10 @@ capped (8 KB before login, 1 MB from clients afterward) so a bad peer can't exha
 | S→C | `snap` | full snapshot: `seq, objects, users, chat, checks` |
 | S→C | `users` `gone` `checks` `ack` `error` `ping` | participants / user left / saved versions / duplicate acknowledged / error / heartbeat |
 
-Object kinds: `stroke` (freehand), `line`, `rect`, `oval`, `text`, `note` (sticky note), `image` (`s` = base64
-PNG, ≤ 700 KB, ≤ 40 per board). `welcome` also carries `boot` (changes on each server start) and `saved_at`.
+Object kinds: `stroke` (freehand), `line`, `rect`, `oval`, `poly` (polygon), `text`, `note` (sticky note),
+`button` (label + link), `image` (`s` = base64 PNG, ≤ 700 KB, ≤ 40 per board; `p` = position or box) and `group`
+(merged layers, parts in `items`). Every object has `pg` (its page) and may have `ln` (page it links to), `h`
+hidden, `lk` locked, `cl` clipped to the layer below, `a` opacity %. `welcome` also carries `boot` (changes on each server start) and `saved_at`.
 S→C `bye` = the server is shutting down.
 
 ## 3. Synchronization, ordering and concurrency
@@ -54,6 +58,17 @@ S→C `bye` = the server is shutting down.
   Concurrent erase of the same object: the second delete is a no-op.
 * **Fill** (`fill` op) sets an object's fill colour: rectangles, ovals, sticky notes, and pen strokes whose ends
   nearly meet (drawn as a filled polygon). Undo restores the previous fill.
+* **Pages:** a room holds several whiteboards (page tabs under the board). Any layer can link to a page; the
+  **Button** tool makes a labelled link button. Clicking a linked layer with the Move tool (or in a presentation)
+  opens that page, like a Figma prototype link. Presenters take followers along to the page they open.
+* **Move / resize** (Move tool, V): drag a layer to move it; drag one of the 8 handles to resize (Shift keeps the
+  proportions). The result is one `set` op with the new points, so it is undoable and validated like a new object.
+* **Layers** (Design tab, FireAlpaca-style): per layer 👁 visible, 🔒 locked (can't be moved, erased or edited until
+  unlocked), ↳ clipped to the layer below (painted only where that layer is painted), opacity, and **Merge**
+  (Shift/Ctrl-click several layers → one `group` layer; undo splits it). Properties depend on the kind: X/Y/W/H for
+  shapes, polygons, strokes, images and buttons; start/end for lines; text and size for text; a merged layer shows
+  only the base options (colour, width, link), which apply to all its parts.
+* **Polygon** tool: click the corners; click the first point, double-click or press Enter to finish.
 * **Area eraser** ("Eraser") rubs out only the part under its circle (size follows the width slider): lines,
   strokes and rect/oval outlines are cut into pieces (`common.erase_pieces`). The client shows the result at once
   and sends the whole drag as one `repl` op (remove these ids, add these pieces), so it is one undo step and
@@ -123,12 +138,12 @@ S→C `bye` = the server is shutting down.
    Large images are shrunk to 800 px. **Zoom:** the − / 100% / + buttons, Ctrl+wheel (zooms at the pointer) or
    Ctrl + / − / 0. Scroll with the wheel, Shift+wheel or the scrollbars, or pan by dragging with the middle button. Pick a name in **To:** (or right-click a participant → *Message
    privately*) to send a private message only they can see. **Dark mode** toggles the theme (remembered).
-6. **Host/admin tools:** Clear, Restore (pick a version), right-click a participant to change role or kick, answer
+6. **Host/admin tools:** Clear (this page), Restore (pick a version), right-click a participant to change role,
+   kick, ban their name or ban their IP address (⋯ → Bans… to lift bans), answer
    access requests (a window pops up). **Save** (named version) is for editors and above. **Export** → SVG, PNG, JPG
    or PDF , available to everyone; invisible objects are left out.
-7. **Design page:** the **Design** tab, or the ⌖ select tool (V) then click an object. Lists every object (even
-   invisible ones); for the selected one you can make it invisible/visible, change stroke colour, width and fill,
-   **clip** it (drag a rectangle; only the part inside is kept) or delete it. Undo works for all of these.
+7. **Design tab:** the layer list for the current page (see *Layers* above). Click a layer on the board with the
+   Move tool (V) to select it; Shift-click to select several. Undo works for everything.
 8. **Presentation mode:** a host/admin clicks **Present**: everyone goes full screen and follows the presenter's
    zoom and scrolling. Esc stops presenting (presenter) or leaves (followers; **Follow presentation** rejoins). **Leave** returns to the login screen.
 
@@ -150,6 +165,8 @@ Right-click an object for quick actions; right-click a person to message, change
 | Ctrl+D | Dark mode | Alt+1/2/3 | People / Chat / Design tab |
 | / | Focus chat | Ctrl+E | Export |
 | Ctrl+Shift+C | Copy room code | Ctrl+R, Ctrl+Q | Request role, leave room |
+| V, G, B | Move, Polygon, Button tools | Ctrl+G, Ctrl+L, Ctrl+Alt+G | Merge, lock, clip to layer below |
+| Ctrl+PgUp / PgDn, Ctrl+Shift+N | Previous / next page, new page | Ctrl+B | Bans (admin) |
 
 ## 7. Requirement coverage and known omissions
 All mandatory requirements (drawing, erasing, color, real-time sync, shared canvas, clear, save/restore,

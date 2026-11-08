@@ -20,7 +20,11 @@ import time
 from common import ATTRS, PORT, apply_op, pack, proof, read_msg
 
 COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#008080", "#9a6324", "#800000"]
-KINDS = {"stroke", "line", "rect", "oval", "text", "note", "image"}
+KINDS = {"stroke", "line", "rect", "oval", "text", "note", "image", "poly", "button", "group"}
+POINTS = {"line": (4, 4), "rect": (4, 4), "oval": (4, 4), "button": (4, 4), "group": (4, 4), "text": (2, 2),
+          "note": (2, 2), "image": (2, 4), "poly": (6, 400)}       # (min, max) numbers in p; stroke: see below
+PAGE_RE = re.compile(r"^[\w-]{1,20}$")
+MAX_ITEMS, MAX_PAGES = 300, 30
 B64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 MAX_IMG, MAX_IMAGES = 700_000, 40     # base64 chars per image; images per room (keeps snapshots sane)
 BOOT = secrets.token_hex(4)           # changes on every server start, so clients can tell it restarted
@@ -46,10 +50,13 @@ class Room:
     restore that last save or start fresh."""
 
     def __init__(self, code, host, salt="", key="", default_role="editor", seq=0, chat=(), checks=(),
-                 users=None, objects=(), private=False, closed=False, saved_at=0, approval=False, **_ignored):
+                 users=None, objects=(), private=False, closed=False, saved_at=0, approval=False, pages=None,
+                 bans=None, **_ignored):
         self.code, self.host, self.salt, self.key = code, host, salt, key
         self.default_role, self.seq, self.private, self.closed = default_role, seq, private, closed
         self.approval, self.waiting = approval, {}   # waiting: name -> (future, wanted role) at the door
+        self.pages = pages or [{"id": "main", "name": "Page 1"}]       # whiteboards inside this room
+        self.bans = bans or {"users": [], "ips": []}
         self.presenter, self.view = None, None
         self.chat, self.checks, self.users = list(chat), list(checks), users or {}
         self.objects = {o["id"]: o for o in objects}
@@ -60,7 +67,7 @@ class Room:
 
     def dump(self):
         d = {k: getattr(self, k) for k in ("code", "host", "salt", "key", "default_role", "seq", "chat",
-                                           "checks", "users", "private", "closed", "saved_at", "approval")}
+                                           "checks", "users", "private", "closed", "saved_at", "approval", "pages", "bans")}
         d["objects"] = list(self.objects.values())
         return d
 
@@ -78,15 +85,16 @@ class Conn:
     def __init__(self, writer):
         self.w, self.user, self.room, self.last = writer, None, None, time.monotonic()
         peer = writer.get_extra_info("peername")
-        self.peer = f"{peer[0]}:{peer[1]}" if peer else "?"
+        self.ip = peer[0] if peer else "?"
+        self.peer = f"{self.ip}:{peer[1]}" if peer else "?"
 
 
-def clean_obj(o, user):
-    """Validate an untrusted drawing object from a client; return a sanitised copy or None."""
+def clean_obj(o, user, room=None, nested=False):
+    """Validate an untrusted drawing object from a client; return a sanitised copy or None.
+    Merged layers are kind "group" with their parts in `items` (groups are flattened, never nested)."""
     try:
         k, p = o["k"], o["p"]
-        lo = 4 if k in ("line", "rect", "oval") else 2
-        hi = MAX_POINTS * 2 if k == "stroke" else lo
+        lo, hi = POINTS.get(k, (2, MAX_POINTS * 2))
         if not (k in KINDS and isinstance(o["id"], str) and 0 < len(o["id"]) <= 40
                 and COLOR_RE.match(o["c"]) and 1 <= int(o["w"]) <= 40
                 and isinstance(p, list) and lo <= len(p) <= hi and len(p) % 2 == 0
@@ -98,9 +106,40 @@ def clean_obj(o, user):
                 return None
         else:
             text = text[:500]
-        return {"id": o["id"], "k": k, "c": o["c"], "w": int(o["w"]), "p": p, "s": text, "f": f if isinstance(f, str) and COLOR_RE.match(f) else "",
-                "u": user}
-    except (KeyError, TypeError, ValueError):
+        out = {"id": o["id"], "k": k, "c": o["c"], "w": int(o["w"]), "p": p, "s": text,
+               "f": f if isinstance(f, str) and COLOR_RE.match(f) else "", "u": user}
+        for flag in ("h", "lk", "cl"):
+            if o.get(flag) is True:
+                out[flag] = True
+        if "a" in o:
+            if not (isinstance(o["a"], int) and 10 <= o["a"] <= 100):
+                return None
+            out["a"] = o["a"]
+        pages = {pg["id"] for pg in room.pages} if room else {"main"}
+        if not nested:
+            out["pg"] = o.get("pg", "main")
+            if out["pg"] not in pages:
+                return None
+        if o.get("ln"):
+            if o["ln"] not in pages:
+                return None
+            out["ln"] = o["ln"]
+        if k == "group":
+            if nested or not isinstance(o.get("items"), list) or not 1 <= len(o["items"]) <= MAX_ITEMS:
+                return None
+            items = []
+            for it in o["items"]:
+                parts = it.get("items", []) if isinstance(it, dict) and it.get("k") == "group" else [it]
+                for part in parts:
+                    c = clean_obj(part, part.get("u", user) if isinstance(part, dict) else user, room, True)
+                    if not c:
+                        return None
+                    items.append(c)
+            if len(items) > MAX_ITEMS or sum(len(c["p"]) for c in items) > 40000:
+                return None
+            out["items"] = items
+        return out
+    except (KeyError, TypeError, ValueError, AttributeError):
         return None
 
 
@@ -139,7 +178,7 @@ def visible(c, user):
 def snapshot(room, user):
     """Complete board + participant + chat state: sent on join, reconnect, resync and restore."""
     return {"seq": room.seq, "objects": list(room.objects.values()), "users": users_info(room),
-            "present": {"by": room.presenter, "view": room.view} if room.presenter else None,
+            "present": {"by": room.presenter, "view": room.view} if room.presenter else None, "pages": room.pages,
             "chat": [c for c in room.chat if visible(c, user)],
             "checks": [{"name": c["name"], "ts": c["ts"]} for c in room.checks]}
 
@@ -220,15 +259,36 @@ def undo_redo(room, me, redo):
             return
 
 
-def clean_attrs(a):
-    """Validate design-page attributes; None if anything is wrong."""
-    if not isinstance(a, dict) or not a or set(a) - set(ATTRS):
+def clean_attrs(room, old, a):
+    """Validate a design/move change by validating the object it would produce. None if invalid."""
+    if not isinstance(a, dict) or not a or set(a) - set(ATTRS) or (old["k"] == "image" and "s" in a):
         return None
-    ok = {"c": lambda v: isinstance(v, str) and COLOR_RE.match(v),
-          "w": lambda v: isinstance(v, int) and 1 <= v <= 40,
-          "f": lambda v: isinstance(v, str) and (v == "" or COLOR_RE.match(v)),
-          "h": lambda v: isinstance(v, bool)}
-    return a if all(ok[k](v) for k, v in a.items()) else None
+    for flag in ("h", "lk", "cl"):
+        if flag in a and not isinstance(a[flag], bool):
+            return None
+    if "items" in a and old["k"] != "group":
+        return None
+    new = clean_obj({**old, **a}, old.get("u", ""), room)
+    if not new or any(new.get(k, ATTRS[k]) != v for k, v in a.items() if k != "items"):
+        return None                     # anything cleaned away means the request was invalid
+    return {k: new.get(k, ATTRS[k]) for k in a}
+
+
+def locked(o, attrs=None):
+    """A locked layer can't be changed, except for unlocking it (or hiding / showing it)."""
+    return o.get("lk") and not (attrs is not None and set(attrs) <= {"lk", "h"})
+
+
+def admins_info(room):
+    """Bans and each member's last address: only for the host and admins."""
+    return {"t": "bans", "bans": room.bans, "ips": {n: u.get("ip", "?") for n, u in room.users.items()}}
+
+
+def kick(room, name, text):
+    c = room.conns.get(name)
+    if c:
+        send(c, {"t": "error", "code": "KICKED", "text": text, "fatal": True})
+        c.w.close()
 
 
 def may_change_role(room, actor, target, new):
@@ -243,6 +303,8 @@ def may_change_role(room, actor, target, new):
 
 def set_role(room, user, role, by):
     room.users[user]["role"] = role
+    if role == "admin" and user in room.conns:
+        send(room.conns[user], admins_info(room))
     room.dirty = True
     bcast(room, {"t": "users", "users": users_info(room)})
     log.info("[%s] %s made %s %s", room.code, by, user, role)
@@ -273,7 +335,8 @@ def handle(room, conn, m):
         if text:
             say(room, me, text, to)
     elif t == "cur":
-        bcast(room, {"t": "cur", "u": me, "x": m.get("x"), "y": m.get("y")}, skip=conn)
+        bcast(room, {"t": "cur", "u": me, "x": m.get("x"), "y": m.get("y"), "pg": str(m.get("pg", "main"))[:20]},
+              skip=conn)
     elif t == "resync":
         send(conn, {"t": "snap", **snapshot(room, me)})
     elif t == "ask":            # in-room request for a different role
@@ -287,19 +350,19 @@ def handle(room, conn, m):
         log.info("[%s] %s asked for %s", room.code, me, want)
     elif t == "view":           # presenter's viewport, relayed to followers
         if room.presenter == me and isinstance(m.get("v"), dict):
-            room.view = {k: m["v"].get(k) for k in ("z", "cx", "cy")}
+            room.view = {k: m["v"].get(k) for k in ("z", "cx", "cy", "pg")}
             bcast(room, {"t": "view", "v": room.view}, skip=conn)
     elif t in ("op", "live", "undo", "redo", "save") and not can_edit:
         deny("You have view-only access")
     elif t == "live":       # in-progress stroke preview: relayed, never stored or sequenced
-        o = clean_obj(m.get("o") or {}, me)
+        o = clean_obj(m.get("o") or {}, me, room)
         if o:
             bcast(room, {"t": "live", "u": me, "o": o, "app": bool(m.get("app"))}, skip=conn)
     elif t == "op":
         op = m.get("op") or {}
         k = op.get("k")
         if k == "add":
-            obj = clean_obj(op.get("obj") or {}, me)
+            obj = clean_obj(op.get("obj") or {}, me, room)
             if not obj or len(room.objects) >= MAX_OBJECTS:
                 return deny("Invalid object or board is full")
             if obj["k"] == "image" and sum(o["k"] == "image" for o in room.objects.values()) >= MAX_IMAGES:
@@ -311,21 +374,23 @@ def handle(room, conn, m):
             push_undo(room, me, ("add", [obj]))
         elif k == "del":
             old = room.objects.get(op.get("id"))
-            if old and not mine(old):
+            if old and (not mine(old) or locked(old)):
                 send(conn, {"t": "ack", "id": "d:" + old["id"]})
-                return deny("You can only erase your own work")
+                return deny("That layer is locked" if mine(old) else "You can only erase your own work")
             if old and commit(room, {"k": "del", "id": old["id"]}, me):
                 push_undo(room, me, ("del", [old]))
             else:
                 send(conn, {"t": "ack", "id": "d:" + str(op.get("id"))})
         elif k in ("fill", "set"):
             old = room.objects.get(op.get("id"))
-            attrs = clean_attrs({"f": op.get("f", "")} if k == "fill" else op.get("attrs"))
+            if not old:
+                return send(conn, {"t": "ack", "id": k[0] + ":" + str(op.get("id"))})
+            attrs = clean_attrs(room, old, {"f": op.get("f", "")} if k == "fill" else op.get("attrs"))
             if attrs is None:
                 return deny("Invalid change")
-            if old and not mine(old):
+            if not mine(old) or locked(old, attrs):
                 send(conn, {"t": "ack", "id": k[0] + ":" + old["id"]})
-                return deny("You can only change your own work")
+                return deny("That layer is locked" if mine(old) else "You can only change your own work")
             prev = {a: old.get(a, ATTRS[a]) for a in attrs} if old else {}
             if old and commit(room, {"k": "set", "id": old["id"], "attrs": attrs}, me):
                 push_undo(room, me, ("set", [(old["id"], prev, attrs)]))
@@ -339,11 +404,11 @@ def handle(room, conn, m):
             if "r:" + rid in room.seen:
                 return send(conn, {"t": "ack", "id": "r:" + rid})
             olds = [room.objects[i] for i in dels if isinstance(i, str) and i in room.objects]
-            if not all(mine(o) for o in olds):
+            if not all(mine(o) and not locked(o) for o in olds):
                 send(conn, {"t": "ack", "id": "r:" + rid})
                 return deny("You can only erase your own work")
             authors = {o["id"]: o.get("u", me) for o in olds}   # pieces keep the original author
-            adds = [clean_obj(o, authors.get(o.get("src"), me)) if isinstance(o, dict) else None for o in adds]
+            adds = [clean_obj(o, authors.get(o.get("src"), me), room) if isinstance(o, dict) else None for o in adds]
             if None in adds or any(o["k"] == "image" for o in adds) or any(o["id"] in room.seen for o in adds) \
                     or len(room.objects) + len(adds) > MAX_OBJECTS + len(dels):
                 return deny("Invalid erase")
@@ -362,13 +427,43 @@ def handle(room, conn, m):
         room.dirty = True
         bcast(room, {"t": "checks", "checks": snapshot(room, me)["checks"]})
         log.info("[%s] %s saved version %r", room.code, me, name)
+    elif t in ("page_add", "page_rename"):     # editors and above manage whiteboards (pages)
+        name = str(m.get("name") or "").strip()[:30] or f"Page {len(room.pages) + 1}"
+        if t == "page_add":
+            if len(room.pages) >= MAX_PAGES:
+                return deny("Too many pages")
+            room.pages.append({"id": secrets.token_hex(4), "name": name})
+        else:
+            pg = next((pg for pg in room.pages if pg["id"] == m.get("id")), None)
+            if not pg:
+                return deny("No such page")
+            pg["name"] = name
+        room.dirty = True
+        bcast(room, {"t": "pages", "pages": room.pages})
     elif not admin:
         deny("Only the host or an admin can do that")
+    elif t == "page_del":
+        pid = m.get("id")
+        if len(room.pages) < 2 or pid not in {pg["id"] for pg in room.pages}:
+            return deny("Can't delete the last page")
+        gone = [o for o in room.objects.values() if o.get("pg", "main") == pid]
+        if gone:
+            push_undo(room, me, ("del", gone))
+            commit(room, {"k": "clear", "pg": pid}, me)
+        room.pages = [pg for pg in room.pages if pg["id"] != pid]
+        for o in list(room.objects.values()):        # links to the deleted page now lead nowhere
+            if o.get("ln") == pid:
+                commit(room, {"k": "set", "id": o["id"], "attrs": {"ln": ""}}, me)
+        room.dirty = True
+        bcast(room, {"t": "pages", "pages": room.pages})
+        log.info("[%s] %s deleted a page", room.code, me)
     elif t == "clear":
-        if room.objects:
-            push_undo(room, me, ("del", list(room.objects.values())))
-            commit(room, {"k": "clear"}, me)
-            log.info("[%s] %s cleared the board", room.code, me)
+        pg = m.get("pg") if m.get("pg") in {p["id"] for p in room.pages} else None
+        gone = [o for o in room.objects.values() if pg is None or o.get("pg", "main") == pg]
+        if gone:
+            push_undo(room, me, ("del", gone))
+            commit(room, {"k": "clear", "pg": pg}, me)
+            log.info("[%s] %s cleared %s", room.code, me, "a page" if pg else "the board")
     elif t == "role":
         if not may_change_role(room, me, m.get("user"), m.get("role")):
             return deny("You can't change that person's role")
@@ -389,12 +484,36 @@ def handle(room, conn, m):
             send(room.conns[user], {"t": "error", "code": "REFUSED", "text": f"{me} declined your request"})
         for c in approvers(room):
             send(c, {"t": "reqdone", "user": user})
-    elif t == "kick" and m.get("user") in room.conns and m["user"] != room.host \
-            and (host or room.role(m["user"]) != "admin"):
-        target = room.conns[m["user"]]
-        send(target, {"t": "error", "code": "KICKED", "text": f"{me} removed you", "fatal": True})
-        target.w.close()
-        log.info("[%s] %s kicked %s", room.code, me, m["user"])
+    elif t in ("kick", "ban"):
+        name = m.get("user")
+        if name not in room.users or name == room.host or (not host and room.role(name) == "admin"):
+            return deny("You can't remove that person")
+        if t == "ban":
+            if m.get("ip"):
+                ip = room.users[name].get("ip")
+                host_ip = room.users[room.host].get("ip")
+                if not ip or ip == host_ip:
+                    return deny("Can't ban that address (it is the owner's)")
+                if ip not in room.bans["ips"]:
+                    room.bans["ips"].append(ip)
+                for n, c in list(room.conns.items()):
+                    if c.ip == ip and n != room.host:
+                        kick(room, n, f"{me} banned your address from this room")
+            elif name not in room.bans["users"]:
+                room.bans["users"].append(name)
+            room.dirty = True
+            for c in approvers(room):
+                send(c, admins_info(room))
+        kick(room, name, f"{me} {'banned' if t == 'ban' else 'removed'} you")
+        log.info("[%s] %s %s %s%s", room.code, me, "banned" if t == "ban" else "kicked", name,
+                 " (by IP)" if m.get("ip") else "")
+    elif t == "unban":
+        for key in ("users", "ips"):
+            if m.get(key[:-1]) in room.bans[key]:
+                room.bans[key].remove(m[key[:-1]])
+        room.dirty = True
+        send(conn, admins_info(room))
+        log.info("[%s] %s lifted a ban", room.code, me)
     elif t == "restore" and isinstance(m.get("idx"), int) and 0 <= m["idx"] < len(room.checks):
         room.objects = {o["id"]: o for o in room.checks[m["idx"]]["objects"]}
         room.seen |= set(room.objects)
@@ -477,6 +596,8 @@ async def login(conn, reader):
             a = await asyncio.wait_for(read_msg(reader, 8192), 10)
             if a.get("t") != "auth" or not hmac.compare_digest(str(a.get("proof")), proof(room.key, nonce)):
                 return await fail("AUTH", "Wrong password")
+    if conn.ip in room.bans["ips"] or user in room.bans["users"]:
+        return await fail("BANNED", "You are banned from this room")
     token, u = str(h.get("token", "")), room.users.get(user)
     if u:
         same = bool(token) and hmac.compare_digest(token, u["token"])    # reconnect with session token
@@ -524,10 +645,13 @@ async def login(conn, reader):
                                 "color": COLORS[len(room.users) % len(COLORS)]}
     conn.room = room
     room.conns[user] = conn
+    u["ip"] = conn.ip
     room.dirty, room.empty_since = True, None
     send(conn, {"t": "welcome", "room": room.code, "host": room.host, "boot": BOOT, "saved_at": room.saved_at,
                 "you": {"name": user, "token": u["token"], "color": u["color"]}, **snapshot(room, user)})
     bcast(room, {"t": "users", "users": users_info(room)})
+    if room.role(user) in APPROVERS:
+        send(conn, admins_info(room))
     say(room, "", f"{user} joined")
     log.info("[%s] %s joined from %s (%d online)", room.code, user, conn.peer, len(room.conns))
     return room

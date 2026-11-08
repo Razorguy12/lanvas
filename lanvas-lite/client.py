@@ -22,14 +22,14 @@ from xml.sax.saxutils import escape
 
 from PyQt6.QtCore import QBuffer, QByteArray, QMarginsF, QSize, QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSizeF, Qt, QTimer
 from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QImage, QKeySequence,
-                         QPageSize, QPainter, QPainterPath, QPdfWriter, QPen, QPixmap, QPolygonF, QShortcut, QIcon)
+                         QPageSize, QPainter, QPainterPath, QPainterPathStroker, QPdfWriter, QPen, QPixmap, QPolygonF, QShortcut, QIcon)
 from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog,
-                             QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
+                             QFormLayout, QFrame, QScrollArea, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
                              QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-                             QMessageBox, QPushButton, QSizePolicy, QSlider, QStackedWidget, QTabWidget, QTextBrowser,
+                             QMessageBox, QPushButton, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QTabWidget, QTextBrowser,
                              QToolButton, QVBoxLayout, QWidget)
 
-from common import PORT, apply_op, clip_pieces, derive_key, erase_pieces, outline, pack, proof, recv_msg
+from common import ATTRS, PORT, apply_op, derive_key, erase_pieces, outline, pack, proof, recv_msg
 
 TOKENS = Path.home() / ".lanvas_tokens.json"     # session tokens, so a restarted client keeps its identity
 PREFS = Path.home() / ".lanvas_prefs.json"       # UI preferences (dark mode)
@@ -42,10 +42,11 @@ ADMIN = ("host", "admin")
 ROLE_NAME = {"host": "Owner", "admin": "Admin", "editor": "Editor", "viewer": "Viewer"}
 PALETTE = ["#1d1f24", "#e5484d", "#f76b15", "#ffc53d", "#30a46c", "#0090ff", "#6d5dfc", "#d6409f"]
 # (tool id, icon, name, shortcut)
-TOOLS = [("pen", "✎", "Pen", "P"), ("rub", "⌫", "Eraser", "E"), ("eraser", "⊗", "Erase object", "X"),
+TOOLS = [("move", "", "Move / select — drag to move, handles to resize", "V"), ("pen", "✎", "Pen", "P"), ("rub", "⌫", "Eraser", "E"), ("eraser", "⊗", "Erase object", "X"),
          ("fill", "◍", "Fill", "F"), ("line", "╱", "Line", "L"), ("rect", "▭", "Rectangle", "R"),
          ("oval", "◯", "Oval", "O"), ("text", "T", "Text", "T"), ("note", "▤", "Sticky note", "N"),
-         ("image", "▣", "Image", "I"), ("design", "⌖", "Select / design", "V")]
+         ("poly", "⬠", "Polygon — click points, double-click / Enter to finish", "G"),
+         ("image", "▣", "Image", "I"), ("button", "⊡", "Link button (goes to another page)", "B")]
 
 THEMES = {
     "light": {"bg": "#eef0f4", "panel": "#ffffff", "border": "#e3e5ea", "fg": "#1d1f24", "muted": "#7a7f8c",
@@ -75,7 +76,7 @@ QToolButton, QPushButton {{ background: transparent; border: none; border-radius
 QToolButton:hover, QPushButton:hover {{ background: {hover}; }}
 QToolButton:pressed, QPushButton:pressed {{ background: {sel}; }}
 QToolButton:checked, QPushButton:checked {{ background: {sel}; color: {accent}; }}
-QToolButton#tool {{ font-size: 18px; min-width: 38px; min-height: 38px; max-width: 38px; max-height: 38px;
+QToolButton#tool {{ font-size: 16px; min-width: 34px; min-height: 34px; max-width: 34px; max-height: 34px;
                     padding: 0; }}
 QPushButton#primary {{ background: {accent}; color: white; font-weight: 600; padding: 8px 16px; }}
 QPushButton#primary:hover {{ background: {accent2}; }}
@@ -87,9 +88,12 @@ QPushButton#seg:checked {{ background: {panel}; color: {fg}; font-weight: 600; }
 #segbar {{ background: {hover}; border-radius: 11px; }}
 QPushButton:disabled, QToolButton:disabled {{ color: {muted}; background: transparent; }}
 QPushButton#primary:disabled {{ background: {hover}; }}
-QLineEdit, QComboBox, QTextBrowser, QListWidget {{ background: {field}; border: 1px solid {border};
+QLineEdit, QComboBox, QTextBrowser, QListWidget, QSpinBox {{ background: {field}; border: 1px solid {border};
     border-radius: 9px; padding: 6px 8px; selection-background-color: {sel}; selection-color: {fg}; }}
-QLineEdit:focus, QComboBox:focus {{ border: 1px solid {accent}; }}
+QSpinBox {{ padding: 3px 6px; }}
+QSpinBox::up-button, QSpinBox::down-button {{ width: 0; border: none; }}
+QSpinBox:disabled {{ color: {muted}; }}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border: 1px solid {accent}; }}
 QLineEdit:disabled {{ color: {muted}; }}
 QComboBox::drop-down {{ border: none; width: 20px; }}
 QComboBox QAbstractItemView {{ background: {panel}; border: 1px solid {border}; selection-background-color: {sel}; }}
@@ -116,6 +120,7 @@ QScrollBar::handle {{ background: {border}; border-radius: 4px; min-height: 24px
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{ background: none;
     border: none; width: 0; height: 0; }}
 QDialog, QMessageBox, QInputDialog {{ background: {panel}; }}
+QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; border: none; }}
 """
 
 
@@ -177,9 +182,11 @@ def seg_dist(px, py, ax, ay, bx, by):
 
 
 def hit(o, x, y):
-    """Is (x, y) inside a fillable object? (rect, oval, note, or a pen stroke whose ends nearly meet)"""
+    """Is (x, y) inside a fillable object? (rect, oval, note, polygon, button, or a closed pen stroke)"""
     k, p = o["k"], o["p"]
-    if k == "rect":
+    if k == "poly":
+        o, k, p = {**o, "k": "stroke"}, "stroke", list(p) + list(p[:2])
+    if k in ("rect", "button"):
         return min(p[0], p[2]) <= x <= max(p[0], p[2]) and min(p[1], p[3]) <= y <= max(p[1], p[3])
     if k == "oval":
         rx, ry = abs(p[2] - p[0]) / 2, abs(p[3] - p[1]) / 2
@@ -269,7 +276,9 @@ class Net(threading.Thread):
             except Fatal as e:
                 self.q.put({"t": "fatal", "text": str(e)})
                 return
-            except (OSError, ValueError) as e:
+            except Exception as e:          # any other failure: reconnect, never let this thread die silently
+                if not isinstance(e, (OSError, ValueError)):
+                    sys.__stderr__.write(f"network error: {e!r}\n")
                 if not self.was_up:
                     self.q.put({"t": "fatal", "text": f"Cannot connect: {e}"})
                     return
@@ -293,9 +302,10 @@ class Renderer:
         self.paths, self.images = {}, {}
 
     @staticmethod
-    def font(px):
+    def font(px, bold=False):
         f = QFont()
         f.setPixelSize(max(1, round(px)))
+        f.setBold(bold)
         return f
 
     def path(self, o):
@@ -306,6 +316,8 @@ class Renderer:
         path.moveTo(p[0], p[1])
         for i in range(2, len(p), 2):
             path.lineTo(p[i], p[i + 1])
+        if o["k"] == "poly":
+            path.closeSubpath()
         self.paths[o["id"]] = (o["p"], path)
         return path
 
@@ -317,37 +329,113 @@ class Renderer:
         return self.images[o["id"]]
 
     def text_font(self, o):
+        if o["k"] == "button":
+            return self.font(14, True)
         return self.font((10 + 2 * o["w"]) * 4 / 3) if o["k"] == "text" else self.font(13)
 
+    def gbox(self, o):
+        """Geometric box (the points themselves): what move / resize and the X/Y/W/H fields act on."""
+        k, p = o["k"], o["p"]
+        if k == "group":
+            r = QRectF()
+            for it in o["items"]:
+                r = r.united(self.gbox(it))
+            return r
+        if k in ("text", "note") or (k == "image" and len(p) == 2):
+            return self.bbox(o)
+        xs, ys = p[0::2], p[1::2]
+        return QRectF(min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+
     def bbox(self, o):
+        """Visual box (includes stroke width): hit testing and selection outline."""
         k, p, w = o["k"], o["p"], o["w"]
         if k == "text":
             flags = int(Qt.TextFlag.TextWordWrap)
             return QFontMetricsF(self.text_font(o)).boundingRect(QRectF(p[0], p[1], 500, 1e5), flags, o["s"])
         if k == "note":
             return QRectF(p[0], p[1], 170, 130)
-        if k == "image":
+        if k == "image" and len(p) == 2:
             img = self.image(o)
             return QRectF(p[0], p[1], img.width() or 80, img.height() or 60)
-        xs, ys = p[0::2], p[1::2]
-        return QRectF(min(xs) - w / 2, min(ys) - w / 2, max(xs) - min(xs) + w, max(ys) - min(ys) + w)
+        if k == "group":
+            r = QRectF()
+            for it in o["items"]:
+                r = r.united(self.bbox(it))
+            return r
+        g = self.gbox(o)
+        return g if k in ("image", "button") else g.adjusted(-w / 2, -w / 2, w / 2, w / 2)
+
+    def area(self, o):
+        """The painted region of a layer: what a clipped layer above it is limited to (FireAlpaca-style)."""
+        k, path = o["k"], QPainterPath()
+        if k == "group":
+            for it in o["items"]:
+                path = path.united(self.area(it))
+        elif k == "oval":
+            path.addEllipse(self.gbox(o))
+        elif k == "poly":
+            path = QPainterPath(self.path(o))
+        elif k in ("stroke", "line"):
+            st = QPainterPathStroker()
+            st.setWidth(max(1, o["w"]))
+            st.setCapStyle(Qt.PenCapStyle.RoundCap)
+            st.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            path = st.createStroke(self.path(o))
+            if o.get("f") and closed(o["p"]):
+                path = path.united(self.path(o))
+        else:
+            path.addRect(self.bbox(o))
+        return path
+
+    def draw_page(self, g, objs):
+        """Draw a page's layers in order. Hidden layers are skipped; a clipped layer is only painted where
+        the nearest unclipped layer below it is painted (and vanishes if that layer is hidden)."""
+        base = None
+        for o in objs:
+            if o.get("cl") and base is not None:
+                if not (o.get("h") or base.get("h")):
+                    g.save()
+                    g.setClipPath(self.area(base), Qt.ClipOperation.IntersectClip)
+                    self.draw(g, o)
+                    g.restore()
+                continue
+            base = o
+            if not o.get("h"):
+                self.draw(g, o)
 
     def draw(self, g, o):
+        a = o.get("a", 100)
+        if a < 100:
+            g.save()
+            g.setOpacity(g.opacity() * a / 100)
         k, p, c, w, f = o["k"], o["p"], QColor(o["c"]), o["w"], o.get("f") or ""
         pen = QPen(c, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         g.setPen(pen)
         g.setBrush(QBrush(QColor(f)) if f else Qt.BrushStyle.NoBrush)
-        if k in ("stroke", "line"):
+        if k == "group":
+            for it in o["items"]:
+                self.draw(g, it)
+        elif k in ("stroke", "line"):
             if k == "stroke" and f and closed(p):
                 g.fillPath(self.path(o), QColor(f))
             if len(p) == 2:
                 g.drawPoint(QPointF(p[0], p[1]))
             else:
                 g.strokePath(self.path(o), pen)
+        elif k == "poly":
+            g.drawPath(self.path(o))
         elif k == "rect":
-            g.drawRect(QRectF(QPointF(p[0], p[1]), QPointF(p[2], p[3])).normalized())
+            g.drawRect(self.gbox(o))
         elif k == "oval":
-            g.drawEllipse(QRectF(QPointF(p[0], p[1]), QPointF(p[2], p[3])).normalized())
+            g.drawEllipse(self.gbox(o))
+        elif k == "button":
+            r = self.gbox(o)
+            g.setPen(Qt.PenStyle.NoPen)
+            g.setBrush(QColor(f or "#6d5dfc"))
+            g.drawRoundedRect(r, min(12, r.height() / 2), min(12, r.height() / 2))
+            g.setPen(c)
+            g.setFont(self.text_font(o))
+            g.drawText(r, int(Qt.AlignmentFlag.AlignCenter), o["s"])
         elif k == "text":
             g.setFont(self.text_font(o))
             g.drawText(QRectF(p[0], p[1], 500, 1e5), int(Qt.TextFlag.TextWordWrap), o["s"])
@@ -359,12 +447,63 @@ class Renderer:
             g.setFont(self.font(13))
             g.drawText(QRectF(p[0] + 8, p[1] + 8, 154, 114), int(Qt.TextFlag.TextWordWrap), o["s"])
         elif k == "image":
-            img = self.image(o)
+            img, box = self.image(o), self.bbox(o)
             if img.isNull():
                 g.setPen(QPen(c, 1, Qt.PenStyle.DashLine))
-                g.drawRect(QRectF(p[0], p[1], 80, 60))
+                g.drawRect(box)
             else:
-                g.drawImage(QPointF(p[0], p[1]), img)
+                g.drawImage(box, img)
+        if a < 100:
+            g.restore()
+
+
+def make_icon(name, color, size=18):
+    """Small line icons painted with QPainter (no image files needed)."""
+    pm = QPixmap(size * 2, size * 2)
+    pm.fill(Qt.GlobalColor.transparent)
+    g = QPainter(pm)
+    g.setRenderHint(QPainter.RenderHint.Antialiasing)
+    g.scale(2 * size / 18, 2 * size / 18)
+    pen = QPen(QColor(color), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    g.setPen(pen)
+    g.setBrush(Qt.BrushStyle.NoBrush)
+    if name == "move":          # pointer arrow + four-way move cross
+        g.setBrush(QColor(color))
+        g.drawPolygon(QPolygonF([QPointF(2, 2), QPointF(10, 5), QPointF(6.5, 6.5), QPointF(5, 10)]))
+        g.setBrush(Qt.BrushStyle.NoBrush)
+        for a, b in (((13, 8.5), (13, 17)), ((8.5, 13), (17, 13))):
+            g.drawLine(QPointF(*a), QPointF(*b))
+        for x, y, dx, dy in ((13, 8.5, 1, 1), (13, 17, 1, -1), (8.5, 13, 1, 1), (17, 13, -1, 1)):
+            if x == 13:
+                g.drawPolyline(QPolygonF([QPointF(x - 1.6, y + 1.6 * dy), QPointF(x, y), QPointF(x + 1.6, y + 1.6 * dy)]))
+            else:
+                g.drawPolyline(QPolygonF([QPointF(x + 1.6 * dx, y - 1.6), QPointF(x, y), QPointF(x + 1.6 * dx, y + 1.6)]))
+    elif name in ("eye", "eye-off"):
+        path = QPainterPath()
+        path.moveTo(1.5, 9)
+        path.quadTo(9, 0.5, 16.5, 9)
+        path.quadTo(9, 17.5, 1.5, 9)
+        g.drawPath(path)
+        g.setBrush(QColor(color))
+        g.drawEllipse(QPointF(9, 9), 2.4, 2.4)
+        if name == "eye-off":
+            g.drawLine(QPointF(3, 15), QPointF(15, 3))
+    elif name in ("lock", "unlock"):
+        g.drawRoundedRect(QRectF(4, 8, 10, 8), 1.5, 1.5)
+        path = QPainterPath()
+        path.moveTo(6.2, 8)
+        path.lineTo(6.2, 5.5)
+        path.arcTo(QRectF(6.2, 2, 5.6, 6), 180, -180)
+        path.lineTo(11.8, 8 if name == "lock" else 6)
+        g.drawPath(path)
+    elif name == "clip":        # FireAlpaca's "clip to layer below" arrow
+        g.drawPolyline(QPolygonF([QPointF(5, 3), QPointF(5, 12), QPointF(14, 12)]))
+        g.drawPolyline(QPolygonF([QPointF(11, 9), QPointF(14, 12), QPointF(11, 15)]))
+    elif name == "link":
+        g.drawRoundedRect(QRectF(2, 7, 8, 5), 2.5, 2.5)
+        g.drawRoundedRect(QRectF(8, 6, 8, 5), 2.5, 2.5)
+    g.end()
+    return QIcon(pm)
 
 
 def card(shadow=True):
@@ -378,6 +517,18 @@ def card(shadow=True):
         fx.setColor(QColor(0, 0, 0, 30))
         f.setGraphicsEffect(fx)
     return f
+
+
+def scroller(inner, vpolicy=Qt.ScrollBarPolicy.ScrollBarAsNeeded):
+    """Wrap a widget so it scrolls instead of forcing the window to grow (small / scaled screens)."""
+    sa = QScrollArea()
+    sa.setWidget(inner)
+    sa.setWidgetResizable(True)
+    sa.setFrameShape(QFrame.Shape.NoFrame)
+    sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    sa.setVerticalScrollBarPolicy(vpolicy)
+    sa.setMinimumHeight(40)
+    return sa
 
 
 def label(text="", name=None, wrap=False):
@@ -530,8 +681,15 @@ class Board(QWidget):
         self.app.motion(x, y)
         if e.buttons() & Qt.MouseButton.LeftButton:
             self.app.drag(x, y)
-        elif self.app.tool == "rub":
-            self.update()
+        else:
+            if not self.space:
+                self.setCursor(self.app.hover_cursor(x, y))
+            if self.app.tool in ("rub", "poly"):
+                self.update()
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.app.finish_poly()
 
     def mouseReleaseEvent(self, e):
         if self.panning is not None:
@@ -556,6 +714,8 @@ class Board(QWidget):
         if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat():
             self.space = True
             self.setCursor(Qt.CursorShape.OpenHandCursor)
+        elif e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.app.finish_poly()
         else:
             super().keyPressEvent(e)
 
@@ -591,23 +751,30 @@ class Board(QWidget):
             dot.setCosmetic(True)
             g.setPen(dot)
             g.drawPoints(pts)
-        for o in app.objs.values():
-            if not o.get("h"):
-                app.rend.draw(g, o)
+        objs = app.page_objs()
+        app.rend.draw_page(g, objs)
         for _, o in app.live.values():
-            app.rend.draw(g, o)
+            if o.get("pg", "main") == app.pg:
+                app.rend.draw(g, o)
         if app.cur:
             app.rend.draw(g, app.cur)
         accent = QPen(QColor(t["accent"]), 1.5, Qt.PenStyle.DashLine)
         accent.setCosmetic(True)
         g.setBrush(Qt.BrushStyle.NoBrush)
-        sel = app.objs.get(app.dsel) if app.dsel else None
-        if sel and not sel.get("h"):
-            g.setPen(accent)
-            g.drawRoundedRect(app.rend.bbox(sel).adjusted(-6 / z, -6 / z, 6 / z, 6 / z), 4, 4)
-        if app.clip and app.clip.get("rect"):
-            g.setPen(accent)
-            g.drawRect(QRectF(QPointF(*app.clip["start"]), QPointF(*app.clip["rect"])).normalized())
+        for oid in app.dsels:
+            o = app.view_obj(oid)
+            if o and not o.get("h"):
+                g.setPen(accent)
+                g.drawRect(app.rend.bbox(o).adjusted(-4 / z, -4 / z, 4 / z, 4 / z))
+        if app.poly:                                   # polygon being drawn
+            solid = QPen(QColor(app.color), 2)
+            solid.setCosmetic(True)
+            g.setPen(solid)
+            pts = [QPointF(app.poly[i], app.poly[i + 1]) for i in range(0, len(app.poly), 2)]
+            g.drawPolyline(QPolygonF(pts + ([QPointF(*self.mouse)] if self.mouse else [])))
+            g.setBrush(QColor(t["panel"]))
+            for q in pts:
+                g.drawEllipse(q, 3.5 / z, 3.5 / z)
         if app.tool == "rub" and self.mouse and app.can_edit():
             r = app.rub_r()
             pen = QPen(QColor(t["muted"]), 1, Qt.PenStyle.DashLine)
@@ -615,6 +782,20 @@ class Board(QWidget):
             g.setPen(pen)
             g.drawEllipse(QPointF(*self.mouse), r, r)
         g.resetTransform()
+        g.setPen(QPen(QColor(t["accent"]), 1.5))
+        g.setBrush(QColor("#ffffff"))
+        for hx, hy in app.handles():                   # resize handles, fixed size on screen
+            g.drawRect(QRectF(hx * z - self.ox - 4, hy * z - self.oy - 4, 8, 8))
+        g.setFont(Renderer.font(11, True))
+        for o in objs:                                 # link badges (Figma-style prototype links)
+            if o.get("ln") and not o.get("h"):
+                b = app.rend.bbox(o)
+                bx, by = b.right() * z - self.ox, b.top() * z - self.oy
+                g.setPen(Qt.PenStyle.NoPen)
+                g.setBrush(QColor(t["accent"]))
+                g.drawEllipse(QPointF(bx, by), 9, 9)
+                g.setPen(QColor("#ffffff"))
+                g.drawText(QRectF(bx - 9, by - 9, 18, 18), int(Qt.AlignmentFlag.AlignCenter), "↗")
         for name, (x, y) in app.cursors.items():       # other people's cursors, fixed size on screen
             u = next((u for u in app.users if u["name"] == name), None)
             if not u:
@@ -640,7 +821,9 @@ class App(QMainWindow):
         self.dark = bool(load_json(PREFS).get("dark"))
         self.rend = Renderer()
         self.setWindowTitle("LANvas")
-        self.resize(1360, 840)
+        avail = QGuiApplication.primaryScreen().availableGeometry()
+        self.setMinimumSize(min(860, avail.width()), min(520, avail.height()))
+        self.resize(min(1360, int(avail.width() * 0.92)), min(860, int(avail.height() * 0.9)))
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
         self.apply_theme()
@@ -667,9 +850,12 @@ class App(QMainWindow):
     def toast(self, text, kind="info"):
         """A rounded message that slides in at the bottom of the window and fades away."""
         host = self.stack.currentWidget()
-        old = getattr(self, "_toast", None)
-        if old:
-            old.deleteLater()
+        old, self._toast = getattr(self, "_toast", None), None
+        if old is not None:
+            try:
+                old.deleteLater()
+            except RuntimeError:            # already faded out and deleted by Qt
+                pass
         w = self._toast = label(text, "toast")
         w.setParent(host)
         if kind == "error":
@@ -689,8 +875,13 @@ class App(QMainWindow):
         a.setKeyValueAt(0.85, 1.0)
         a.setKeyValueAt(1, 0.0)
         a.setEasingCurve(QEasingCurve.Type.InOutQuad)
-        a.finished.connect(w.deleteLater)
+        a.finished.connect(lambda: self._forget_toast(w))
         a.start()
+
+    def _forget_toast(self, w):
+        if getattr(self, "_toast", None) is w:
+            self._toast = None
+        w.deleteLater()
 
     # ---------- login ----------
     def login_screen(self):
@@ -787,9 +978,10 @@ class App(QMainWindow):
         outer.addWidget(lobby, 0, Qt.AlignmentFlag.AlignVCenter)
         outer.addStretch()
         self.rooms = []
-        self.login = page
-        self.stack.addWidget(page)
-        self.stack.setCurrentWidget(page)
+        self.login = scroller(page)
+        self.login.setObjectName("page")
+        self.stack.addWidget(self.login)
+        self.stack.setCurrentWidget(self.login)
         self.mode_changed()
         self.refresh_rooms()
 
@@ -864,14 +1056,16 @@ class App(QMainWindow):
         self.objs, self.seq, self.pending, self.live, self.cursors = {}, 0, {}, {}, {}
         self.users, self.checks, self.cur, self.online, self.resyncing = [], [], None, True, False
         self.tool, self.width, self.color, self.last_cur, self.gest = "pen", 3, self.me["color"], 0, None
-        self.dsel, self.clip, self.reqwins, self.boot = None, None, {}, None
+        self.dsel, self.dsels, self.dids, self.reqwins, self.boot = None, [], [], {}, None
+        self.poly, self.xf, self.preview, self.pg = None, None, {}, "main"
+        self.pages, self.bans, self.ips = [{"id": "main", "name": "Page 1"}], {"users": [], "ips": []}, {}
         self.presenter, self.presenting, self.following, self.last_view = None, False, False, None
         self.rend = Renderer()
         page = self.main = QWidget()
         page.setObjectName("page")
         grid = QGridLayout(page)
-        grid.setContentsMargins(12, 12, 12, 8)
-        grid.setSpacing(12)
+        grid.setContentsMargins(10, 10, 10, 6)
+        grid.setSpacing(10)
         self.btn = {}
 
         # top bar
@@ -913,10 +1107,14 @@ class App(QMainWindow):
 
         # tool rail
         rail = self.rail = card()
-        rail.setFixedWidth(64)
-        rv = QVBoxLayout(rail)
-        rv.setContentsMargins(12, 10, 12, 10)
-        rv.setSpacing(3)
+        rail.setFixedWidth(62)
+        outer = QVBoxLayout(rail)
+        outer.setContentsMargins(0, 6, 0, 6)
+        inner = QWidget()
+        rv = QVBoxLayout(inner)
+        rv.setContentsMargins(13, 2, 13, 2)
+        rv.setSpacing(2)
+        outer.addWidget(scroller(inner, Qt.ScrollBarPolicy.ScrollBarAlwaysOff))
         self.tools = QButtonGroup(self)
         self.tool_btn = {}
         for tid, icon, name, key in TOOLS:
@@ -925,6 +1123,7 @@ class App(QMainWindow):
             self.tools.addButton(b)
             rv.addWidget(b)
         self.tool_btn["pen"].setChecked(True)
+        self.tool_btn["move"].setIconSize(QSize(20, 20))
         rv.addSpacing(8)
         sw = QGridLayout()
         sw.setSpacing(4)
@@ -945,7 +1144,7 @@ class App(QMainWindow):
         self.wslider.setValue(self.width)
         self.wslider.setToolTip("Width  ([ and ])")
         self.wslider.valueChanged.connect(self.set_width)
-        self.wslider.setFixedHeight(80)
+        self.wslider.setFixedHeight(64)
         rv.addWidget(self.wslider, 0, Qt.AlignmentFlag.AlignHCenter)
         self.wlabel = label("3", "muted")
         self.wlabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -955,6 +1154,11 @@ class App(QMainWindow):
 
         self.board = Board(self)
         grid.addWidget(self.board, 1, 1)
+        self.page_bar = QWidget()
+        pl = QHBoxLayout(self.page_bar)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(4)
+        grid.addWidget(self.page_bar, 2, 1)
 
         # right panel with tabs
         side = self.side = card()
@@ -997,48 +1201,16 @@ class App(QMainWindow):
             self.tabs.addTab(w, name)
         grid.addWidget(side, 1, 2)
         self.status = label("", "status")
-        grid.addWidget(self.status, 2, 0, 1, 3)
+        grid.addWidget(self.status, 3, 0, 1, 3)
+        self.tabs.currentChanged.connect(lambda i: i == 2 and self.design_refresh())
         grid.setColumnStretch(1, 1)
         grid.setRowStretch(1, 1)
         self.stack.addWidget(page)
         self.stack.setCurrentWidget(page)
         self.bind_keys()
+        self.build_pages()
         self.set_color(self.color)
         QTimer.singleShot(0, self.board.fit)
-
-    def build_design(self, w):
-        v = QVBoxLayout(w)
-        v.setContentsMargins(0, 8, 0, 0)
-        v.addWidget(label("Layers — top is drawn last", "muted"))
-        self.dlist = QListWidget()
-        self.dlist.itemSelectionChanged.connect(self.design_pick)
-        v.addWidget(self.dlist, 1)
-        g = QGridLayout()
-        g.setHorizontalSpacing(8)
-        g.setVerticalSpacing(6)
-        self.dinfo = label("", "muted", wrap=True)
-        g.addWidget(self.dinfo, 0, 0, 1, 2)
-        self.dvis = Switch("Visible  (H)", self)
-        self.dvis.clicked.connect(lambda: self.dset(h=not self.dvis.isChecked()))
-        self.dw = QSlider(Qt.Orientation.Horizontal)
-        self.dw.setRange(1, 40)
-        self.dw.sliderReleased.connect(lambda: self.dset(w=self.dw.value()))
-        self.dctl = [self.dvis,
-                     button("Stroke colour", "soft", cb=self.design_color),
-                     self.dw,
-                     button("Fill colour", "soft", cb=lambda: self.design_color(fill=True)),
-                     button("Remove fill", "soft", cb=lambda: self.dset(f="")),
-                     button("✂  Clip to rectangle", "soft", "Drag a rectangle on the board", self.start_clip),
-                     button("Delete  (Del)", "danger", cb=self.delete_selected)]
-        g.addWidget(self.dctl[0], 1, 0, 1, 2)
-        g.addWidget(self.dctl[1], 2, 0)
-        g.addWidget(self.dctl[3], 2, 1)
-        g.addWidget(label("Width", "muted"), 3, 0)
-        g.addWidget(self.dctl[2], 3, 1)
-        g.addWidget(self.dctl[4], 4, 0)
-        g.addWidget(self.dctl[5], 4, 1)
-        g.addWidget(self.dctl[6], 5, 0, 1, 2)
-        v.addLayout(g)
 
     def bind_keys(self):
         """Every action has a key. `?` lists them all."""
@@ -1051,24 +1223,33 @@ class App(QMainWindow):
             ("Edit", [("Ctrl+Z", "Undo", lambda: self.send({"t": "undo"})),
                       ("Ctrl+Y", "Redo", lambda: self.send({"t": "redo"})),
                       ("Ctrl+Shift+Z", "Redo", lambda: self.send({"t": "redo"})),
-                      ("Del", "Delete selected object", self.delete_selected),
-                      ("H", "Hide / show selected object", self.toggle_hidden),
+                      ("Del", "Delete selected layers", self.delete_selected),
+                      ("H", "Hide / show selected layers", self.toggle_hidden),
+                      ("Ctrl+L", "Lock / unlock selected layers", self.toggle_lock),
+                      ("Ctrl+Alt+G", "Clip to layer below", self.toggle_clip),
+                      ("Ctrl+G", "Merge selected layers", self.merge),
+                      ("Shift+click", "Select several layers", None),
+                      ("Enter", "Finish polygon", None),
                       ("Ctrl+S", "Save a version", self.save),
                       ("Ctrl+Shift+S", "Restore a version", self.restore),
-                      ("Ctrl+Shift+Backspace", "Clear the board (admin)", self.clear)]),
+                      ("Ctrl+Shift+Backspace", "Clear this page (admin)", self.clear)]),
             ("View", [("Ctrl+=", "Zoom in", lambda: self.zoom(1)), ("Ctrl+-", "Zoom out", lambda: self.zoom(-1)),
                       ("Ctrl+0", "Zoom to 100%", lambda: self.zoom(0)), ("Ctrl+1", "Fit board", self.board.fit),
                       ("Space+drag", "Pan (also middle-drag / wheel)", None),
                       ("F5", "Present / stop presenting", self.toggle_present),
                       ("Esc", "Cancel / leave presentation", self.escape),
                       ("Ctrl+D", "Dark mode", self.toggle_dark)]),
-            ("Room", [("Alt+1", "People tab", lambda: self.tabs.setCurrentIndex(0)),
+            ("Room", [("Ctrl+PgDown", "Next page", lambda: self.step_page(1)),
+                      ("Ctrl+PgUp", "Previous page", lambda: self.step_page(-1)),
+                      ("Ctrl+Shift+N", "New page", self.add_page),
+                      ("Alt+1", "People tab", lambda: self.tabs.setCurrentIndex(0)),
                       ("Alt+2", "Chat tab", lambda: self.tabs.setCurrentIndex(1)),
                       ("Alt+3", "Design tab", lambda: self.tabs.setCurrentIndex(2)),
                       ("/", "Write a chat message", self.focus_chat),
                       ("Ctrl+E", "Export", self.export_menu),
                       ("Ctrl+Shift+C", "Copy room code", self.copy_code),
                       ("Ctrl+R", "Request a role", self.request_role),
+                      ("Ctrl+B", "Bans (admin)", self.show_bans),
                       ("Ctrl+Q", "Leave the room", self.leave),
                       ("?", "Show keyboard shortcuts", self.show_keys),
                       ("F1", "Show keyboard shortcuts", self.show_keys)]),
@@ -1118,8 +1299,11 @@ class App(QMainWindow):
         return self.is_admin() or o.get("u") in (None, self.me["name"])
 
     def set_tool(self, t):
+        if self.poly and t != "poly":
+            self.finish_poly()
         self.tool = t
         self.tool_btn[t].setChecked(True)
+        self.tool_btn["move"].setIcon(make_icon("move", self.t["accent"] if t == "move" else self.t["fg"]))
         self.board.update()
 
     def set_color(self, c):
@@ -1195,7 +1379,8 @@ class App(QMainWindow):
                                     "▶  Follow" if self.presenter and not self.following else "▶  Present")
         self.btn["Request role"].setEnabled(self.me_role() != "host")
         for t, b in self.tool_btn.items():
-            b.setEnabled(edit or t == "design")
+            b.setEnabled(edit or t == "move")
+        self.tool_btn["move"].setIcon(make_icon("move", self.t["accent"] if self.tool == "move" else self.t["fg"]))
         cur = self.to.currentText()
         self.to.clear()
         names = [EVERYONE] + [u["name"] for u in self.users if u["name"] != self.me["name"]]
@@ -1342,6 +1527,7 @@ class App(QMainWindow):
         """Replace local state with the server's snapshot (join, reconnect, resync, restore)."""
         self.objs = {o["id"]: o for o in m["objects"]}
         self.seq, self.users, self.checks, self.resyncing = m["seq"], m["users"], m["checks"], False
+        self.on_pages({"pages": m.get("pages") or [{"id": "main", "name": "Page 1"}]})
         self.live.clear()
         self.cursors.clear()
         self.chat.clear()
@@ -1425,7 +1611,9 @@ class App(QMainWindow):
         self.board.update()
 
     def on_cur(self, m):
-        if isinstance(m["x"], (int, float)) and isinstance(m["y"], (int, float)):
+        if m.get("pg", "main") != self.pg:
+            self.cursors.pop(m["u"], None)
+        elif isinstance(m["x"], (int, float)) and isinstance(m["y"], (int, float)):
             self.cursors[m["u"]] = (m["x"], m["y"])
             self.board.update()
 
@@ -1490,26 +1678,212 @@ class App(QMainWindow):
     def zoom_changed(self):
         self.btn["Zoom"].setText(f"{round(self.board.z * 100)}%")
 
-    def near(self, x, y, r):
-        """Ids of visible objects within r board units of (x, y), bottom to top."""
-        out = []
-        for oid, o in self.objs.items():
-            if o.get("h") or not self.rend.bbox(o).adjusted(-r, -r, r, r).contains(QPointF(x, y)):
-                continue
-            pts = outline(o)
-            if pts is None or (o.get("f") and o["k"] != "line"):
-                out.append(oid)
-                continue
-            rr = r + o["w"] / 2
-            if len(pts) == 2 and math.hypot(pts[0] - x, pts[1] - y) <= rr or any(
-                    seg_dist(x, y, pts[i], pts[i + 1], pts[i + 2], pts[i + 3]) <= rr for i in range(0, len(pts) - 2, 2)):
-                out.append(oid)
-        return out
+    # ---------- pages (multiple whiteboards in one room) ----------
+    def page_objs(self):
+        """The current page's layers in drawing order, with in-progress move/resize previews applied."""
+        pv = self.preview
+        return [pv.get(o["id"], o) for o in self.objs.values() if o.get("pg", "main") == self.pg]
 
+    def view_obj(self, oid):
+        return self.preview.get(oid) or self.objs.get(oid)
+
+    def page_name(self, pid):
+        return next((p["name"] for p in self.pages if p["id"] == pid), "?")
+
+    def goto_page(self, pid, quiet=False):
+        if pid not in {p["id"] for p in self.pages} or pid == self.pg:
+            return
+        self.pg, self.dsel, self.dsels, self.poly, self.cur = pid, None, [], None, None
+        self.build_pages()
+        self.design_later()
+        self.board.update()
+        if not quiet:
+            self.toast(f"→ {self.page_name(pid)}")
+
+    def step_page(self, d):
+        ids = [p["id"] for p in self.pages]
+        self.goto_page(ids[(ids.index(self.pg) + d) % len(ids)])
+
+    def on_pages(self, m):
+        self.pages = m["pages"]
+        if self.pg not in {p["id"] for p in self.pages}:
+            self.pg = self.pages[0]["id"]
+        self.build_pages()
+        self.design_later()
+        self.board.update()
+
+    def build_pages(self):
+        lay = self.page_bar.layout()
+        while lay.count():
+            w = lay.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        for p in self.pages:
+            b = button(p["name"], "seg", f"Open {p['name']} (Ctrl+PgUp / PgDn)", lambda pid=p["id"]: self.goto_page(pid),
+                       checkable=True)
+            b.setChecked(p["id"] == self.pg)
+            b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            b.customContextMenuRequested.connect(lambda pos, p=p, b=b: self.page_menu(p, b.mapToGlobal(pos)))
+            lay.addWidget(b)
+        lay.addWidget(button("+", tip="New page (Ctrl+Shift+N)", cb=self.add_page, tool=True))
+        lay.addStretch()
+
+    def add_page(self):
+        if not self.can_edit():
+            return self.toast("Viewers can't add pages", "error")
+        name, ok = QInputDialog.getText(self, "New page", "Page name:", text=f"Page {len(self.pages) + 1}")
+        if ok:
+            self.send({"t": "page_add", "name": name})
+
+    def page_menu(self, p, at):
+        def rename():
+            name, ok = QInputDialog.getText(self, "Rename page", "Page name:", text=p["name"])
+            if ok:
+                self.send({"t": "page_rename", "id": p["id"], "name": name})
+
+        def delete():
+            if QMessageBox.question(self, "Delete page", f"Delete “{p['name']}” and everything on it?") \
+                    == QMessageBox.StandardButton.Yes:
+                self.send({"t": "page_del", "id": p["id"]})
+        self.popup([("Rename…", rename if self.can_edit() else None),
+                    ("Delete page", delete if self.is_admin() and len(self.pages) > 1 else None)], at)
+
+    # ---------- hit testing ----------
+    def touches(self, o, x, y, r):
+        if o["k"] == "group":
+            return any(self.touches(i, x, y, r) for i in o["items"])
+        if not self.rend.bbox(o).adjusted(-r, -r, r, r).contains(QPointF(x, y)):
+            return False
+        pts = outline(o)
+        if pts is None or o["k"] in ("button",) or (o.get("f") and o["k"] != "line"):
+            return True
+        rr = r + o["w"] / 2
+        return len(pts) == 2 and math.hypot(pts[0] - x, pts[1] - y) <= rr or any(
+            seg_dist(x, y, pts[i], pts[i + 1], pts[i + 2], pts[i + 3]) <= rr for i in range(0, len(pts) - 2, 2))
+
+    def near(self, x, y, r):
+        """Ids of visible layers on this page within r board units of (x, y), bottom to top."""
+        return [o["id"] for o in self.page_objs() if not o.get("h") and self.touches(o, x, y, r)]
+
+    def top_at(self, x, y):
+        hits = self.near(x, y, 5 / self.board.z)
+        return hits[-1] if hits else None
+
+    def editable(self, o):
+        return o is not None and self.can_edit() and self.mine(o) and not o.get("lk")
+
+    def resizable(self, o):
+        return self.editable(o) and o["k"] not in ("text", "note")
+
+    def handles(self):
+        """Eight resize handles around the selected layer (corners first, then edges)."""
+        o = self.view_obj(self.dsel) if self.dsel and len(self.dsels) == 1 else None
+        if not o or o.get("h") or not self.resizable(o) or self.tool != "move":
+            return []
+        b = self.rend.gbox(o)
+        l, t, r, bt, cx, cy = b.left(), b.top(), b.right(), b.bottom(), b.center().x(), b.center().y()
+        return [(l, t), (r, t), (r, bt), (l, bt), (cx, t), (r, cy), (cx, bt), (l, cy)]
+
+    def handle_at(self, x, y):
+        tol = 7 / self.board.z
+        return next((i for i, (hx, hy) in enumerate(self.handles()) if abs(hx - x) <= tol and abs(hy - y) <= tol), None)
+
+    def hover_cursor(self, x, y):
+        C = Qt.CursorShape
+        if self.tool != "move":
+            return C.CrossCursor
+        h = self.handle_at(x, y)
+        if h is not None:
+            return [C.SizeFDiagCursor, C.SizeBDiagCursor] [h % 2] if h < 4 else [C.SizeVerCursor, C.SizeHorCursor][h % 2]
+        oid = self.top_at(x, y)
+        if oid:
+            o = self.objs[oid]
+            return C.PointingHandCursor if o.get("ln") else C.SizeAllCursor if self.editable(o) else C.ArrowCursor
+        return C.ArrowCursor
+
+    # ---------- move / resize ----------
+    def boxed(self, o):
+        """Images placed at natural size get an explicit box so they can be scaled."""
+        if o["k"] == "image" and len(o["p"]) == 2:
+            b = self.rend.bbox(o)
+            return {**o, "p": [b.left(), b.top(), b.right(), b.bottom()]}
+        return o
+
+    def xform(self, o, f):
+        """Map every point of o through f(x, y) -> (x, y); groups map all their parts."""
+        if o["k"] == "group":
+            items = [self.xform(i, f) for i in o["items"]]
+            b = QRectF()
+            for i in items:
+                b = b.united(self.rend.gbox(i))
+            return {**o, "items": items, "p": [round(b.left(), 1), round(b.top(), 1), round(b.right(), 1),
+                                               round(b.bottom(), 1)]}
+        p = o["p"]
+        out = []
+        for i in range(0, len(p), 2):
+            nx, ny = f(p[i], p[i + 1])
+            out += [round(nx, 1), round(ny, 1)]
+        return {**o, "p": out}
+
+    def refit(self, o, nb):
+        """o scaled from its current geometric box into the box nb."""
+        o = self.boxed(o)
+        ob = self.rend.gbox(o)
+        sx = nb.width() / ob.width() if ob.width() else 1
+        sy = nb.height() / ob.height() if ob.height() else 1
+        return self.xform(o, lambda x, y: (nb.left() + (x - ob.left()) * sx, nb.top() + (y - ob.top()) * sy))
+
+    def commit_geometry(self, oid, new):
+        attrs = {"p": new["p"]}
+        if new["k"] == "group":
+            attrs["items"] = new["items"]
+        self.do({"k": "set", "id": oid, "attrs": attrs})
+
+    def drag_xf(self, x, y):
+        xf, (x0, y0) = self.xf, self.xf["start"]
+        if abs(x - x0) + abs(y - y0) < 3 / self.board.z and not xf["moved"]:
+            return
+        xf["moved"] = True
+        o = xf["orig"]
+        if xf["mode"] == "move" and self.editable(o):
+            self.preview[o["id"]] = self.xform(o, lambda a, b: (a + x - x0, b + y - y0))
+        elif xf["mode"] == "resize":
+            b, h = QRectF(xf["box"]), xf["h"]
+            l, t, r, bt = b.left(), b.top(), b.right(), b.bottom()
+            if h in (0, 3, 7):
+                l = x
+            if h in (1, 2, 5):
+                r = x
+            if h in (0, 1, 4):
+                t = y
+            if h in (2, 3, 6):
+                bt = y
+            nb = QRectF(QPointF(l, t), QPointF(r, bt)).normalized()
+            if h < 4 and QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier and b.width() and b.height():
+                k = max(nb.width() / b.width(), nb.height() / b.height())      # Shift keeps proportions
+                nb.setWidth(b.width() * k)
+                nb.setHeight(b.height() * k)
+                if h in (0, 3):
+                    nb.moveRight(b.right() if l < b.right() else nb.right())
+                if h in (0, 1):
+                    nb.moveBottom(b.bottom() if t < b.bottom() else nb.bottom())
+            self.preview[o["id"]] = self.refit(o, nb)
+        self.board.update()
+
+    def end_xf(self):
+        xf, self.xf = self.xf, None
+        new = self.preview.pop(xf["orig"]["id"], None)
+        if xf["moved"] and new:
+            self.commit_geometry(xf["orig"]["id"], new)
+        elif not xf["moved"] and xf["orig"].get("ln") and xf["mode"] != "resize":
+            self.goto_page(xf["orig"]["ln"])            # clicking a linked object follows the link
+        self.board.update()
+
+    # ---------- drawing tools ----------
     def motion(self, x, y):
         if time.time() - self.last_cur > 0.05:
             self.last_cur = time.time()
-            self.send({"t": "cur", "x": x, "y": y})
+            self.send({"t": "cur", "x": x, "y": y, "pg": self.pg})
 
     def rub_r(self):
         return 3 + 2 * self.width
@@ -1520,12 +1894,12 @@ class App(QMainWindow):
         r, g = self.rub_r(), self.gest
         for oid in self.near(x, y, r + 20):
             o = self.objs.get(oid)
-            pieces = erase_pieces(o, x, y, r, MAX_PTS) if o and self.mine(o) else None
+            pieces = erase_pieces(o, x, y, r, MAX_PTS) if self.editable(o) else None
             if pieces is None:
                 continue
             src = o.get("src", oid) if oid in g["new"] else oid
             new = [{"id": uuid.uuid4().hex[:12], "k": "stroke", "c": o["c"], "w": o["w"], "p": p, "s": "", "f": "",
-                    "src": src} for p in pieces]
+                    "src": src, "pg": self.pg} for p in pieces]
             if oid in g["new"]:
                 del g["new"][oid]           # a piece made earlier in this same gesture
             else:
@@ -1541,34 +1915,48 @@ class App(QMainWindow):
                      "add": [o for i, o in g["new"].items() if i in self.objs]})
 
     def fill(self, x, y):
-        target = next((o for o in reversed(list(self.objs.values())) if not o.get("h") and hit(o, x, y)), None)
+        target = next((o for o in reversed(self.page_objs()) if not o.get("h") and hit(o, x, y)), None)
         if not target:
-            self.toast("Fill: click inside a rectangle, oval, note or closed pen shape", "error")
-        elif not self.mine(target):
-            self.toast("You can only change your own work", "error")
+            self.toast("Fill: click inside a shape, polygon, button, note or closed pen stroke", "error")
+        elif not self.editable(target):
+            self.toast("That layer is locked" if self.mine(target) else "You can only change your own work", "error")
         elif target.get("f", "") != self.color:
             self.do({"k": "set", "id": target["id"], "attrs": {"f": self.color}})
 
     def erase(self, x, y):
         for oid in self.near(x, y, 4 / self.board.z):
-            if self.mine(self.objs[oid]):
+            if self.editable(self.objs[oid]):
                 self.do({"k": "del", "id": oid})
 
-    def top_at(self, x, y):
-        hits = self.near(x, y, 5 / self.board.z)
-        return hits[-1] if hits else None
+    def new_obj(self, k, p, **kw):
+        return {"id": uuid.uuid4().hex[:12], "k": k, "c": self.color, "w": self.width, "p": p, "s": "",
+                "pg": self.pg, **kw}
+
+    def finish_poly(self):
+        pts, self.poly = self.poly, None
+        if pts and len(pts) >= 6:
+            self.do({"k": "add", "obj": self.new_obj("poly", pts)})
+        self.board.update()
 
     def press(self, x, y):
         t = self.tool
-        if self.clip:
-            self.clip["start"] = (x, y)
-            return
-        if t == "design":
+        if t == "move":
+            h = self.handle_at(x, y)
+            if h is not None:
+                o = self.boxed(self.objs[self.dsel])
+                self.xf = {"mode": "resize", "h": h, "orig": o, "box": self.rend.gbox(o), "start": (x, y),
+                           "moved": False}
+                return
             oid = self.top_at(x, y)
-            self.dsel = oid
-            if oid:
-                self.tabs.setCurrentIndex(2)
-            self.design_refresh()
+            shift = QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier
+            if shift and oid:
+                self.dsels = [i for i in self.dsels if i != oid] if oid in self.dsels else self.dsels + [oid]
+                self.dsel = self.dsels[-1] if self.dsels else None
+            else:
+                self.dsel, self.dsels = oid, [oid] if oid else []
+                if oid:
+                    self.xf = {"mode": "move", "orig": self.objs[oid], "start": (x, y), "moved": False}
+            self.design_later()
             return self.board.update()
         if not self.can_edit():
             return self.toast("You have view-only access", "error")
@@ -1579,6 +1967,11 @@ class App(QMainWindow):
         if t == "rub":
             self.gest = {"del": [], "new": {}}
             return self.rub(x, y)
+        if t == "poly":
+            if self.poly and len(self.poly) >= 6 and math.hypot(x - self.poly[0], y - self.poly[1]) <= 10 / self.board.z:
+                return self.finish_poly()           # clicked the first point again: close it
+            self.poly = (self.poly or []) + [x, y]
+            return self.board.update()
         if t == "image":
             path, _ = QFileDialog.getOpenFileName(self, "Insert image", "",
                                                   "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;All files (*)")
@@ -1587,23 +1980,22 @@ class App(QMainWindow):
                     data = load_image(path)
                 except ValueError as err:
                     return self.toast(str(err), "error")
-                self.do({"k": "add", "obj": {"id": uuid.uuid4().hex[:12], "k": "image", "c": self.color,
-                                             "w": 1, "p": [x, y], "s": data}})
+                self.do({"k": "add", "obj": self.new_obj("image", [x, y], w=1, s=data)})
             return
         if t in ("text", "note"):
             s, ok = QInputDialog.getMultiLineText(self, "Sticky note" if t == "note" else "Text", "Text:")
             if ok and s.strip():
-                self.do({"k": "add", "obj": {"id": uuid.uuid4().hex[:12], "k": t, "c": self.color,
-                                             "w": self.width, "p": [x, y], "s": s[:500]}})
+                self.do({"k": "add", "obj": self.new_obj(t, [x, y], s=s[:500])})
             return
-        self.cur = {"id": uuid.uuid4().hex[:12], "k": "stroke" if t == "pen" else t, "c": self.color,
-                    "w": self.width, "p": [x, y] if t == "pen" else [x, y, x, y], "s": ""}
+        if t == "button":
+            self.cur = self.new_obj("button", [x, y, x, y], c="#ffffff", f=self.color, s="Button")
+        else:
+            self.cur = self.new_obj("stroke" if t == "pen" else t, [x, y] if t == "pen" else [x, y, x, y])
         self.sent, self.last_live = 0, 0
 
     def drag(self, x, y):
-        if self.clip and self.clip.get("start"):
-            self.clip["rect"] = (x, y)
-            return self.board.update()
+        if self.xf:
+            return self.drag_xf(x, y)
         if self.tool == "eraser" and self.can_edit():
             return self.erase(x, y)
         if self.gest is not None:
@@ -1632,28 +2024,50 @@ class App(QMainWindow):
                 self.send({"t": "live", "o": o})
 
     def release(self, x, y):
-        if self.clip and self.clip.get("start"):
-            return self.finish_clip(*self.clip["start"], x, y)
+        if self.xf:
+            return self.end_xf()
         self.end_rub()
         o, self.cur = self.cur, None
         if not o:
             return
+        if o["k"] == "button":
+            self.board.update()
+            return self.make_button(o)
         if o["k"] == "stroke" or o["p"][:2] != o["p"][2:]:      # ignore zero-size shapes
             self.do({"k": "add", "obj": o})
         self.board.update()
 
+    def make_button(self, o):
+        """A clickable button that takes people to another page (like a Figma prototype link)."""
+        x0, y0, x1, y1 = o["p"]
+        if abs(x1 - x0) < 20 or abs(y1 - y0) < 12:
+            x1, y1 = x0 + 150, y0 + 46
+        name, ok = QInputDialog.getText(self, "Link button", "Button label:", text="Next")
+        if not ok:
+            return
+        choices = ["(no link)"] + [p["name"] for p in self.pages]
+        target, ok = QInputDialog.getItem(self, "Link button", "Go to page:", choices, 0, False)
+        ln = next((p["id"] for p in self.pages if p["name"] == target), "") if ok else ""
+        self.do({"k": "add", "obj": {**o, "p": [x0, y0, x1, y1], "s": name[:60] or "Button", "ln": ln}})
+
     def board_menu(self, at, x, y):
         oid = self.top_at(x, y)
         if not oid:
-            return self.popup([("Nothing here", None), ("-", None),
-                               ("Fit board", self.board.fit), ("Keyboard shortcuts", self.show_keys)], at)
-        self.dsel = oid
-        self.design_refresh()
+            return self.popup([("New page", self.add_page), ("Fit board", self.board.fit),
+                               ("Keyboard shortcuts", self.show_keys)], at)
+        if oid not in self.dsels:
+            self.dsel, self.dsels = oid, [oid]
+        self.design_later()
         self.board.update()
-        o, ok = self.objs[oid], self.can_edit() and self.mine(self.objs[oid])
+        o = self.objs[oid]
+        ok = self.editable(o)
         self.popup([("Open in Design tab", lambda: self.tabs.setCurrentIndex(2)),
-                    ("Hide", self.toggle_hidden if ok else None),
-                    ("Clip to rectangle", self.start_clip if ok and outline(o) else None),
+                    (f"Go to “{self.page_name(o['ln'])}”" if o.get("ln") else "No link", 
+                     (lambda: self.goto_page(o["ln"])) if o.get("ln") else None),
+                    ("-", None),
+                    ("Show" if o.get("h") else "Hide", self.toggle_hidden if self.mine(o) and self.can_edit() else None),
+                    ("Unlock" if o.get("lk") else "Lock", self.toggle_lock if self.mine(o) and self.can_edit() else None),
+                    ("Merge selected  Ctrl+G", self.merge if len(self.dsels) > 1 else None),
                     ("-", None), ("Delete", self.delete_selected if ok else None)], at)
 
     # ---------- room actions ----------
@@ -1669,14 +2083,33 @@ class App(QMainWindow):
             entries.append(("-", None))
             entries += [(f"Make {r}", lambda r=r: self.send({"t": "role", "user": name, "role": r}))
                         for r in ("viewer", "editor", "admin") if r != u["role"]]
-            entries += [("-", None), ("Kick from room", lambda: self.send({"t": "kick", "user": name}))]
+            ip = self.ips.get(name, "?")
+            entries += [("-", None), ("Kick from room", lambda: self.send({"t": "kick", "user": name})),
+                        (f"Ban “{name}”", lambda: self.ban(name, False)),
+                        (f"Ban IP address  {ip}", lambda: self.ban(name, True))]
         self.popup(entries, self.plist.mapToGlobal(pos))
+
+    def ban(self, name, by_ip):
+        what = f"the address {self.ips.get(name, '?')} (everyone on it)" if by_ip else f"“{name}”"
+        if QMessageBox.question(self, "Ban", f"Ban {what} from this room?") == QMessageBox.StandardButton.Yes:
+            self.send({"t": "ban", "user": name, "ip": by_ip})
+
+    def on_bans(self, m):
+        self.bans, self.ips = m["bans"], m["ips"]
+
+    def show_bans(self):
+        if not self.is_admin():
+            return self.toast("Only the owner or an admin can manage bans", "error")
+        entries = [(f"Unban user “{u}”", lambda u=u: self.send({"t": "unban", "user": u})) for u in self.bans["users"]]
+        entries += [(f"Unban address {ip}", lambda ip=ip: self.send({"t": "unban", "ip": ip})) for ip in self.bans["ips"]]
+        self.popup(entries or [("Nobody is banned", None)])
 
     def more_menu(self):
         admin, edit = self.is_admin(), self.can_edit()
         self.popup([("Save a version…        Ctrl+S", self.save if edit else None),
                     ("Restore a version…     Ctrl+Shift+S", self.restore if admin else None),
-                    ("Clear the board", self.clear if admin else None), ("-", None),
+                    ("Clear this page", self.clear if admin else None),
+                    ("Bans…", self.show_bans if admin else None), ("-", None),
                     ("Request a role…         Ctrl+R", self.request_role if self.me_role() != "host" else None),
                     ("Copy room code", self.copy_code),
                     ("Light mode" if self.dark else "Dark mode", self.toggle_dark),
@@ -1702,9 +2135,9 @@ class App(QMainWindow):
     def clear(self):
         if not self.is_admin():
             return self.toast("Only the owner or an admin can clear the board", "error")
-        if QMessageBox.question(self, "Clear board", "Remove everything from the board for everyone?\n"
-                                                     "(You can undo it.)") == QMessageBox.StandardButton.Yes:
-            self.send({"t": "clear"})
+        if QMessageBox.question(self, "Clear page", f"Remove everything from “{self.page_name(self.pg)}” for "
+                                                    f"everyone?\n(You can undo it.)") == QMessageBox.StandardButton.Yes:
+            self.send({"t": "clear", "pg": self.pg})
 
     # ---------- export ----------
     def export_menu(self):
@@ -1719,7 +2152,7 @@ class App(QMainWindow):
             return
         if not path.lower().endswith(ext):
             path += ext
-        objs = [o for o in self.objs.values() if not o.get("h")]
+        objs = [o for o in self.objs.values() if o.get("pg", "main") == self.pg]      # the current page
         if fmt == "SVG":
             ok = self.export_svg(path, objs)
         elif fmt == "PDF":
@@ -1731,49 +2164,58 @@ class App(QMainWindow):
             g.setRenderHint(QPainter.RenderHint.Antialiasing)
             sx = w.width() / BOARD_W
             g.scale(sx, sx)
-            for o in objs:
-                self.rend.draw(g, o)
+            self.rend.draw_page(g, objs)
             ok = g.end()
         else:
             img = QImage(BOARD_W, BOARD_H, QImage.Format.Format_RGB32)
             img.fill(QColor("#ffffff"))
             g = QPainter(img)
             g.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
-            for o in objs:
-                self.rend.draw(g, o)
+            self.rend.draw_page(g, objs)
             g.end()
             ok = img.save(path, "JPG" if fmt == "JPG" else "PNG", 92)
         self.toast(f"Exported {Path(path).name}" if ok else "Export failed", "ok" if ok else "error")
 
+    def svg(self, o):
+        """One layer as SVG (clipping to the layer below is not exported to SVG)."""
+        p, c, w, k, f = o["p"], o["c"], o["w"], o["k"], o.get("f") or "none"
+        op = f' opacity="{o["a"] / 100}"' if o.get("a", 100) < 100 else ""
+        st = f'stroke="{c}" stroke-width="{w}" fill="{f}" stroke-linecap="round" stroke-linejoin="round"{op}'
+        pts = " ".join(f"{p[i]},{p[i + 1]}" for i in range(0, len(p), 2))
+        b = self.rend.gbox(o)
+        if k == "group":
+            return f"<g{op}>" + "".join(self.svg(i) for i in o["items"]) + "</g>"
+        if k in ("stroke", "line"):
+            fill = f'<polygon points="{pts}" fill="{f}" stroke="none"/>' if k == "stroke" and f != "none" and closed(p) else ""
+            line = st.replace(f'fill="{f}"', 'fill="none"')
+            return fill + f'<polyline points="{pts if len(p) > 2 else pts + " " + pts}" {line}/>'
+        if k == "poly":
+            return f'<polygon points="{pts}" {st}/>'
+        if k in ("rect", "oval"):
+            if k == "rect":
+                return f'<rect x="{b.x()}" y="{b.y()}" width="{b.width()}" height="{b.height()}" {st}/>'
+            return (f'<ellipse cx="{b.center().x()}" cy="{b.center().y()}" rx="{b.width() / 2}" ry="{b.height() / 2}" '
+                    f'{st}/>')
+        if k == "image":
+            b = self.rend.bbox(o)
+            return (f'<image x="{b.x()}" y="{b.y()}" width="{b.width()}" height="{b.height()}"{op} '
+                    f'preserveAspectRatio="none" href="data:image/png;base64,{o["s"]}"/>')
+        if k == "button":
+            return (f'<g{op}><rect x="{b.x()}" y="{b.y()}" width="{b.width()}" height="{b.height()}" rx="12" '
+                    f'fill="{o.get("f") or "#6d5dfc"}"/><text x="{b.center().x()}" y="{b.center().y() + 5}" '
+                    f'text-anchor="middle" font-weight="bold" font-size="14" fill="{c}">{escape(o["s"])}</text></g>')
+        out = ""
+        if k == "note":
+            out = (f'<rect x="{p[0]}" y="{p[1]}" width="170" height="130" rx="6" fill="{o.get("f") or "#fff59d"}" '
+                   f'stroke="{c}" stroke-width="2"/>')
+        size = round((10 + 2 * w) * 4 / 3) if k == "text" else 13
+        return out + (f'<text x="{p[0] + (0 if k == "text" else 8)}" y="{p[1] + size + (0 if k == "text" else 8)}" '
+                      f'fill="{c if k == "text" else "#222"}" font-size="{size}"{op}>{escape(o["s"])}</text>')
+
     def export_svg(self, path, objs):
         out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{BOARD_W}" height="{BOARD_H}">',
                '<rect width="100%" height="100%" fill="white"/>']
-        for o in objs:
-            p, c, w, k, f = o["p"], o["c"], o["w"], o["k"], o.get("f") or "none"
-            st = f'stroke="{c}" stroke-width="{w}" fill="{f}" stroke-linecap="round" stroke-linejoin="round"'
-            pts = " ".join(f"{p[i]},{p[i + 1]}" for i in range(0, len(p), 2))
-            if k == "stroke" and f != "none" and closed(p):
-                out.append(f'<polygon points="{pts}" fill="{f}" stroke="none"/>')
-            if k in ("stroke", "line"):
-                st = st.replace(f'fill="{f}"', 'fill="none"')
-                out.append(f'<polyline points="{pts if len(p) > 2 else pts + " " + pts}" {st}/>')
-            elif k == "rect":
-                out.append(f'<rect x="{min(p[0], p[2])}" y="{min(p[1], p[3])}" width="{abs(p[2] - p[0])}" '
-                           f'height="{abs(p[3] - p[1])}" {st}/>')
-            elif k == "oval":
-                out.append(f'<ellipse cx="{(p[0] + p[2]) / 2}" cy="{(p[1] + p[3]) / 2}" rx="{abs(p[2] - p[0]) / 2}" '
-                           f'ry="{abs(p[3] - p[1]) / 2}" {st}/>')
-            elif k == "image":
-                img = self.rend.image(o)
-                out.append(f'<image x="{p[0]}" y="{p[1]}" width="{img.width()}" height="{img.height()}" '
-                           f'href="data:image/png;base64,{o["s"]}"/>')
-            else:
-                if k == "note":
-                    out.append(f'<rect x="{p[0]}" y="{p[1]}" width="170" height="130" rx="6" '
-                               f'fill="{o.get("f") or "#fff59d"}" stroke="{c}" stroke-width="2"/>')
-                size = round((10 + 2 * w) * 4 / 3) if k == "text" else 13
-                out.append(f'<text x="{p[0] + (0 if k == "text" else 8)}" y="{p[1] + size + (0 if k == "text" else 8)}" '
-                           f'fill="{c if k == "text" else "#222"}" font-size="{size}">{escape(o["s"])}</text>')
+        out += [self.svg(o) for o in objs if not o.get("h")]
         out.append("</svg>")
         try:
             Path(path).write_text("\n".join(out))
@@ -1781,7 +2223,93 @@ class App(QMainWindow):
         except OSError:
             return False
 
-    # ---------- design tab ----------
+    # ---------- design tab (FireAlpaca-style layers) ----------
+    def build_design(self, w):
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 8, 0, 0)
+        v.setSpacing(6)
+        head = QHBoxLayout()
+        head.addWidget(label("Layers", "h2"))
+        head.addStretch()
+        self.merge_btn = button("Merge", "soft", "Merge selected layers (Ctrl+G) — Shift/Ctrl-click to pick several",
+                                self.merge)
+        self.del_btn = button("Delete", "danger", "Delete selected layers (Del)", self.delete_selected)
+        head.addWidget(self.merge_btn)
+        head.addWidget(self.del_btn)
+        v.addLayout(head)
+        self.dlist = QListWidget()
+        self.dlist.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.dlist.itemSelectionChanged.connect(self.design_pick)
+        v.addWidget(self.dlist, 3)
+        op = QHBoxLayout()
+        op.addWidget(label("Opacity", "muted"))
+        self.dop = QSlider(Qt.Orientation.Horizontal)
+        self.dop.setRange(10, 100)
+        self.dop.sliderReleased.connect(lambda: self.dset(a=self.dop.value()))
+        self.dop.valueChanged.connect(lambda val: self.dop_lbl.setText(f"{val}%"))
+        self.dop_lbl = label("100%", "muted")
+        self.dop_lbl.setFixedWidth(38)
+        op.addWidget(self.dop, 1)
+        op.addWidget(self.dop_lbl)
+        v.addLayout(op)
+        v.addWidget(label("Properties", "h2"))
+        self.props = QWidget()
+        self.form = QFormLayout(self.props)
+        self.form.setContentsMargins(0, 0, 0, 0)
+        self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.form.setHorizontalSpacing(10)
+        v.addWidget(scroller(self.props), 2)
+
+    def layer_name(self, o):
+        icons = {"stroke": "✎", "line": "╱", "rect": "▭", "oval": "◯", "text": "T", "note": "▤", "image": "▣",
+                 "poly": "⬠", "button": "⊡", "group": "❖"}
+        k = o["k"]
+        name = f"Merged ({len(o['items'])})" if k == "group" else \
+            {"poly": "Polygon", "rect": "Rectangle", "button": "Button"}.get(k, k.capitalize())
+        if k in ("text", "note", "button"):
+            name += f" “{o['s'][:14]}”"
+        return f"{icons.get(k, '•')}  {name}"
+
+    def layer_row(self, o):
+        """One layer: visibility, lock and clip toggles, colour chip, name, link badge."""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 4, 0)
+        h.setSpacing(1)
+        can = self.can_edit() and self.mine(o)
+        t = self.t
+        for attr, icon, tip in (("h", "eye-off" if o.get("h") else "eye", "Show / hide (H)"),
+                                ("lk", "lock" if o.get("lk") else "unlock", "Lock / unlock (Ctrl+L)"),
+                                ("cl", "clip", "Clip to the layer below (Ctrl+Alt+G)")):
+            on = bool(o.get(attr)) != (attr == "h")
+            b = QToolButton()
+            b.setIcon(make_icon(icon, t["accent"] if on else t["muted"], 16))
+            b.setIconSize(QSize(16, 16))
+            b.setFixedSize(26, 26)
+            b.setStyleSheet("padding: 0;")
+            b.setToolTip(tip)
+            b.setEnabled(can)
+            b.clicked.connect(lambda _=False, a=attr: self.set_attrs(o["id"], {a: not o.get(a, False)}))
+            h.addWidget(b)
+        h.addSpacing(4)
+        if o.get("cl"):
+            h.addWidget(label("↳", "muted"))
+        chip = QLabel()
+        chip.setFixedSize(12, 12)
+        chip.setStyleSheet(f"background: {o.get('f') or o['c']}; border-radius: 3px; border: 1px solid {t['border']};")
+        h.addWidget(chip)
+        h.addSpacing(4)
+        name = label(self.layer_name(o))
+        if o.get("h"):
+            name.setStyleSheet(f"color: {t['muted']};")
+        h.addWidget(name, 1)
+        if o.get("ln"):
+            ln = QLabel()
+            ln.setPixmap(make_icon("link", t["accent"], 14).pixmap(14, 14))
+            ln.setToolTip(f"Links to {self.page_name(o['ln'])}")
+            h.addWidget(ln)
+        return row
+
     def design_later(self):
         if self.main and not getattr(self, "_dpending", False):
             self._dpending = True
@@ -1791,90 +2319,202 @@ class App(QMainWindow):
         self._dpending = False
         if not self.main:
             return
-        icons = {"stroke": "✎", "line": "╱", "rect": "▭", "oval": "◯", "text": "T", "note": "▤", "image": "▣"}
-        self.dids = list(reversed(list(self.objs)))
+        self.dsels = [i for i in self.dsels if i in self.objs and self.objs[i].get("pg", "main") == self.pg]
+        if self.dsel not in self.dsels:
+            self.dsel = self.dsels[-1] if self.dsels else None
+        self.board.update()
+        if self.tabs.currentIndex() != 2:
+            return                                      # rebuilt when the tab is opened
+        objs = list(reversed(self.page_objs()))[:400]
+        self.dids = [o["id"] for o in objs]
         self.dlist.blockSignals(True)
         self.dlist.clear()
-        for i in self.dids:
-            o = self.objs[i]
-            extra = f" “{o['s'][:16]}”" if o["k"] in ("text", "note") else ""
-            it = QListWidgetItem(f"{icons.get(o['k'], '•')}  {o['k'].capitalize()}{extra}   ·  "
-                                 f"{o.get('u') or self.me['name']}" + ("   (hidden)" if o.get("h") else ""))
-            pm = QPixmap(12, 12)
-            pm.fill(QColor(o["c"]))
-            it.setIcon(QIcon(pm))
-            if o.get("h"):
-                it.setForeground(QColor(self.t["muted"]))
+        for o in objs:
+            it = QListWidgetItem()
+            it.setSizeHint(QSize(0, 32))
             self.dlist.addItem(it)
-        o = self.objs.get(self.dsel)
-        if o:
-            self.dlist.setCurrentRow(self.dids.index(self.dsel))
+            self.dlist.setItemWidget(it, self.layer_row(o))
+            it.setSelected(o["id"] in self.dsels)
         self.dlist.blockSignals(False)
+        o = self.objs.get(self.dsel)
+        self.merge_btn.setEnabled(len(self.dsels) > 1 and all(self.editable(self.objs[i]) for i in self.dsels))
+        self.del_btn.setEnabled(bool(self.dsels) and all(self.editable(self.objs[i]) for i in self.dsels))
+        self.dop.setEnabled(self.editable(o))
+        self.dop.setValue(o.get("a", 100) if o else 100)
+        self.build_props(o)
+
+    def build_props(self, o):
+        """Options for the selected layer, specific to its kind; a merged layer shows only base options."""
+        f = self.form
+        while f.rowCount():
+            f.removeRow(0)
         if not o:
-            self.dsel = None
-            self.dinfo.setText("Select a layer, or click an object with the ⌖ tool (V).")
-            for c in self.dctl:
-                c.setEnabled(False)
-            return
-        self.dinfo.setText(f"<b>{o['k'].capitalize()}</b> by {html_escape(o.get('u') or self.me['name'])}<br>"
-                           f"Colour {o['c']} · fill {o.get('f') or 'none'} · {len(o['p']) // 2} points"
-                           + ("" if self.mine(o) else "<br><i>Not yours — read-only</i>"))
-        self.dvis.setChecked(not o.get("h"))
-        self.dw.setValue(o["w"])
-        ok = self.can_edit() and self.mine(o)
-        fillable = o["k"] in ("rect", "oval", "note") or (o["k"] == "stroke" and closed(o["p"]))
-        for c, extra in zip(self.dctl, (True, o["k"] != "image", o["k"] not in ("image", "note"), fillable,
-                                        fillable, outline(o) is not None, True)):
-            c.setEnabled(ok and extra)
-        self.dvis.update()
+            return f.addRow(label("Select a layer, or click one with the Move tool (V). "
+                                  "Shift/Ctrl-click layers to merge them.", "muted", wrap=True))
+        if len(self.dsels) > 1:
+            return f.addRow(label(f"{len(self.dsels)} layers selected — Merge (Ctrl+G) combines them into one.",
+                                  "muted", wrap=True))
+        k, ok, t = o["k"], self.editable(o), self.t
+        who = html_escape(o.get("u") or self.me["name"])
+        note = "" if ok else (" · locked" if o.get("lk") else " · read-only")
+        f.addRow(label(("Merged layer · base options" if k == "group" else f"{self.layer_name(o)}") +
+                       f"<br><span style='color:{t['muted']}'>by {who}{note}</span>", wrap=True))
+
+        def spin(val, cb, lo=-99999, hi=99999):
+            s = QSpinBox()
+            s.setRange(lo, hi)
+            s.setValue(round(val))
+            s.setEnabled(ok)
+            s.editingFinished.connect(lambda: s.value() != round(val) and cb(s.value()))
+            return s
+
+        def pair(a, b, la, lb):
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            for lab, s in ((la, a), (lb, b)):
+                h.addWidget(label(lab, "muted"))
+                h.addWidget(s, 1)
+            return w
+
+        def chip(colour, cb, tip):
+            b = button("", tip=tip, cb=cb)
+            b.setFixedSize(46, 24)
+            b.setEnabled(ok)
+            b.setStyleSheet(f"background: {colour or 'transparent'}; border-radius: 7px; border: 1px solid {t['border']};")
+            return b
+        if k != "image":
+            f.addRow("Colour", chip(o["c"], self.design_color, "Stroke / text colour"))
+        if k in ("stroke", "line", "rect", "oval", "poly", "group", "text"):
+            f.addRow("Size" if k == "text" else "Width", spin(o["w"], lambda v: self.set_base(w=v), 1, 40))
+        if k in ("rect", "oval", "poly", "note", "button") or (k == "stroke" and closed(o["p"])):
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.addWidget(chip(o.get("f"), lambda: self.design_color(fill=True), "Fill colour"))
+            nb = button("None", "soft", cb=lambda: self.dset(f=""))
+            nb.setEnabled(ok and bool(o.get("f")))
+            h.addWidget(nb)
+            h.addStretch()
+            f.addRow("Fill", w)
+        if k in ("text", "note", "button"):
+            e = QLineEdit(o["s"])
+            e.setEnabled(ok)
+            e.editingFinished.connect(lambda: e.text() != o["s"] and self.dset(s=e.text()[:500]))
+            f.addRow("Text", e)
+        if k == "line":
+            pts = list(o["p"])
+            setp = lambda i: (lambda v: self.dset(p=[*pts[:i], v, *pts[i + 1:]]))     # noqa: E731
+            f.addRow("Start", pair(spin(pts[0], setp(0)), spin(pts[1], setp(1)), "X", "Y"))
+            f.addRow("End", pair(spin(pts[2], setp(2)), spin(pts[3], setp(3)), "X", "Y"))
+        elif k in ("text", "note"):
+            b = self.rend.gbox(o)
+            mv = lambda dx, dy: self.commit_geometry(o["id"], self.xform(o, lambda x, y: (x + dx, y + dy)))  # noqa
+            f.addRow("Position", pair(spin(b.x(), lambda v: mv(v - b.x(), 0)), spin(b.y(), lambda v: mv(0, v - b.y())),
+                                      "X", "Y"))
+        elif k != "group":
+            b = self.rend.gbox(self.boxed(o))
+
+            def box(x=None, y=None, w=None, h=None):
+                nb = QRectF(b.x() if x is None else x, b.y() if y is None else y,
+                            max(1, b.width() if w is None else w), max(1, b.height() if h is None else h))
+                self.commit_geometry(o["id"], self.refit(o, nb))
+            f.addRow("Position", pair(spin(b.x(), lambda v: box(x=v)), spin(b.y(), lambda v: box(y=v)), "X", "Y"))
+            f.addRow("Size ", pair(spin(b.width(), lambda v: box(w=v), 1), spin(b.height(), lambda v: box(h=v), 1),
+                                   "W", "H"))
+        link = QComboBox()
+        link.addItem("No link", "")
+        for page in self.pages:
+            if page["id"] != self.pg:
+                link.addItem(f"→ {page['name']}", page["id"])
+        link.setCurrentIndex(max(0, link.findData(o.get("ln", ""))))
+        link.setEnabled(ok)
+        link.activated.connect(lambda i: self.dset(ln=link.itemData(i)))
+        f.addRow("Link", link)
 
     def design_pick(self):
-        row = self.dlist.currentRow()
-        if 0 <= row < len(self.dids):
-            self.dsel = self.dids[row]
-            self.design_refresh()
-            self.board.update()
+        rows = sorted(i.row() for i in self.dlist.selectedIndexes())
+        # the list can be a moment behind the board (someone else just erased / merged a layer)
+        self.dsels = [self.dids[r] for r in rows if r < len(self.dids) and self.dids[r] in self.objs]
+        cur = self.dlist.currentRow()
+        self.dsel = self.dids[cur] if 0 <= cur < len(self.dids) and self.dids[cur] in self.dsels else (
+            self.dsels[0] if self.dsels else None)
+        if self.dsel not in self.objs:
+            self.dsel = self.dsels[0] if self.dsels else None
+        self.dop.setValue(self.objs[self.dsel].get("a", 100) if self.dsel else 100)
+        self.merge_btn.setEnabled(len(self.dsels) > 1 and all(self.editable(self.objs[i]) for i in self.dsels))
+        self.del_btn.setEnabled(bool(self.dsels) and all(self.editable(self.objs[i]) for i in self.dsels))
+        self.build_props(self.objs.get(self.dsel))
+        self.board.update()
+
+    def set_attrs(self, oid, attrs):
+        o = self.objs.get(oid)
+        if not o or not (self.can_edit() and self.mine(o)):
+            return self.toast("You can only change your own work", "error")
+        if o.get("lk") and not set(attrs) <= {"lk", "h"}:
+            return self.toast("That layer is locked — unlock it first (Ctrl+L)", "error")
+        if any(o.get(a, ATTRS[a]) != v for a, v in attrs.items()):
+            self.do({"k": "set", "id": oid, "attrs": attrs})
 
     def dset(self, **attrs):
+        if self.dsel:
+            self.set_attrs(self.dsel, attrs)
+
+    def set_base(self, **attrs):
+        """Base options on a merged layer apply to all of its parts."""
         o = self.objs.get(self.dsel)
-        if o and self.mine(o) and self.can_edit() and any(o.get(a) != v for a, v in attrs.items()):
-            self.do({"k": "set", "id": o["id"], "attrs": attrs})
+        if o and o["k"] == "group" and set(attrs) & {"c", "w"}:
+            attrs["items"] = [{**i, **{a: v for a, v in attrs.items() if a in ("c", "w")}} for i in o["items"]]
+        self.dset(**attrs)
 
     def toggle_hidden(self):
-        o = self.objs.get(self.dsel)
-        if o:
-            self.dset(h=not o.get("h"))
+        for oid in self.dsels:
+            if oid in self.objs:
+                self.set_attrs(oid, {"h": not self.objs[oid].get("h", False)})
+
+    def toggle_lock(self):
+        for oid in self.dsels:
+            if oid in self.objs:
+                self.set_attrs(oid, {"lk": not self.objs[oid].get("lk", False)})
+
+    def toggle_clip(self):
+        for oid in self.dsels:
+            if oid in self.objs:
+                self.set_attrs(oid, {"cl": not self.objs[oid].get("cl", False)})
 
     def delete_selected(self):
-        o = self.objs.get(self.dsel)
-        if o and self.mine(o) and self.can_edit():
-            self.do({"k": "del", "id": o["id"]})
-            self.dsel = None
+        for oid in list(self.dsels):
+            if self.editable(self.objs.get(oid)):
+                self.do({"k": "del", "id": oid})
+        self.dsel, self.dsels = None, []
+        self.design_later()
+
+    def merge(self):
+        """Merge the selected layers into one (FireAlpaca 'merge down'); undo splits them again."""
+        ids = [i for i in self.objs if i in self.dsels]          # keep drawing order
+        objs = [self.objs[i] for i in ids]
+        if len(objs) < 2:
+            return self.toast("Select two or more layers to merge (Shift-click)", "error")
+        if not all(self.editable(o) for o in objs):
+            return self.toast("You can only merge your own, unlocked layers", "error")
+        items = []
+        for o in objs:
+            items += o["items"] if o["k"] == "group" else [{k: v for k, v in o.items() if k not in ("pg", "src")}]
+        b = QRectF()
+        for o in objs:
+            b = b.united(self.rend.gbox(o))
+        g = {"id": uuid.uuid4().hex[:12], "k": "group", "c": objs[0]["c"], "w": objs[0]["w"], "s": "", "items": items,
+             "p": [round(b.left(), 1), round(b.top(), 1), round(b.right(), 1), round(b.bottom(), 1)], "pg": self.pg}
+        self.do({"k": "repl", "rid": uuid.uuid4().hex[:12], "del": ids, "add": [g]})
+        self.dsel, self.dsels = g["id"], [g["id"]]
+        self.design_later()
 
     def design_color(self, fill=False):
         o = self.objs.get(self.dsel)
         if o:
             c = QColorDialog.getColor(QColor((o.get("f") if fill else o["c"]) or self.color), self, "Colour")
             if c.isValid():
-                self.dset(**({"f": c.name()} if fill else {"c": c.name()}))
-
-    def start_clip(self):
-        if self.dsel:
-            self.clip = {"id": self.dsel}
-            self.toast("Clip: drag a rectangle on the board — only the part inside is kept (Esc cancels)")
-
-    def finish_clip(self, x0, y0, x1, y1):
-        oid, self.clip = self.clip["id"], None
-        o = self.objs.get(oid)
-        pieces = clip_pieces(o, x0, y0, x1, y1, MAX_PTS) if o else None
-        self.board.update()
-        if pieces is None:
-            return
-        new = [{"id": uuid.uuid4().hex[:12], "k": "stroke", "c": o["c"], "w": o["w"], "p": p, "s": "", "f": "",
-                "h": bool(o.get("h")), "src": oid} for p in pieces]
-        self.do({"k": "repl", "rid": uuid.uuid4().hex[:12], "del": [oid], "add": new})
-        self.dsel = new[0]["id"] if new else None
-        self.design_later()
+                self.dset(f=c.name()) if fill else self.set_base(c=c.name())
 
     # ---------- presentation mode ----------
     def toggle_present(self):
@@ -1891,19 +2531,21 @@ class App(QMainWindow):
         self.refresh_ui()
 
     def escape(self):
-        if self.clip:
-            self.clip = None
-            self.board.update()
+        if self.poly:
+            self.poly = None
+        elif self.xf:
+            self.preview.pop(self.xf["orig"]["id"], None)
+            self.xf = None
         elif self.presenting:
             self.send({"t": "present", "on": False})
         elif self.following:
             self.following = False
             self.layout(False)
             self.refresh_ui()
-        elif self.dsel:
-            self.dsel = None
-            self.design_refresh()
-            self.board.update()
+        elif self.dsels:
+            self.dsel, self.dsels = None, []
+            self.design_later()
+        self.board.update()
 
     def on_present(self, m):
         by = m.get("by")
@@ -1938,7 +2580,8 @@ class App(QMainWindow):
 
     def view_now(self):
         b = self.board
-        return {"z": b.zi, "cx": round((b.width() / 2 + b.ox) / b.z), "cy": round((b.height() / 2 + b.oy) / b.z)}
+        return {"z": b.zi, "cx": round((b.width() / 2 + b.ox) / b.z), "cy": round((b.height() / 2 + b.oy) / b.z),
+                "pg": self.pg}
 
     def present_tick(self):
         """While presenting, send our viewport (zoom + centre) whenever it changes."""
@@ -1957,6 +2600,8 @@ class App(QMainWindow):
         self.last_view = v
         if not self.following:
             return
+        if v.get("pg"):
+            self.goto_page(v["pg"], quiet=True)
         if isinstance(v.get("z"), int) and 0 <= v["z"] < len(ZOOMS):
             self.board.zi = v["z"]
             self.zoom_changed()
@@ -1969,7 +2614,28 @@ class App(QMainWindow):
         super().closeEvent(e)
 
 
+LOG = Path.home() / ".lanvas_client.log"
+
+
+def survive(kind, value, tb):
+    """PyQt6 aborts the whole program when a Python exception escapes a Qt callback. Instead, log it to
+    ~/.lanvas_client.log, tell the user, and keep the session (and the connection) running."""
+    import traceback
+    text = "".join(traceback.format_exception(kind, value, tb))
+    sys.__stderr__.write(text)
+    try:
+        with LOG.open("a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
+    except OSError:
+        pass
+    win = QApplication.activeWindow()
+    if isinstance(win, App):
+        win.toast(f"Something went wrong ({kind.__name__}) — details in {LOG.name}", "error")
+
+
 if __name__ == "__main__":
+    sys.excepthook = survive
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     qt = QApplication(sys.argv)
     qt.setApplicationName("LANvas")
     win = App()

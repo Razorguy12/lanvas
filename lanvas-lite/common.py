@@ -55,7 +55,10 @@ def proof(key_hex, nonce):
     return hmac.new(bytes.fromhex(key_hex), nonce.encode(), "sha256").hexdigest()
 
 
-ATTRS = {"c": "#000000", "w": 1, "f": "", "h": False}     # editable on the design page, with defaults
+# Attributes a "set" op may change (design tab, move/resize), with their defaults:
+# colour, width, fill, hidden, locked, clipped to the layer below, opacity %, link to page, points, text, group items
+ATTRS = {"c": "#000000", "w": 1, "f": "", "h": False, "lk": False, "cl": False, "a": 100, "ln": "", "p": None,
+         "s": "", "items": None}
 
 
 def apply_op(objects, op):
@@ -63,7 +66,7 @@ def apply_op(objects, op):
 
     Used identically by server and clients. Every op is idempotent, so a duplicated or retransmitted
     op changes nothing. Returns True only if the board actually changed.
-        {"k": "add", "obj": {...}}   {"k": "del", "id": "..."}   {"k": "clear"}
+        {"k": "add", "obj": {...}}   {"k": "del", "id": "..."}   {"k": "clear", "pg": page or None for all}
         {"k": "fill", "id": "...", "f": "#rrggbb" or ""}          (set an object's fill colour)
         {"k": "repl", "del": [ids], "add": [objs]}                (area eraser / clip: replace by pieces)
         {"k": "set", "id": "...", "attrs": {"c", "w", "f", "h"}}  (design page: colour, width, fill, hidden)
@@ -77,9 +80,11 @@ def apply_op(objects, op):
     if k == "del":
         return objects.pop(op.get("id"), None) is not None
     if k == "clear":
-        had = bool(objects)
-        objects.clear()
-        return had
+        pg = op.get("pg")
+        gone = [i for i, o in objects.items() if pg is None or o.get("pg", "main") == pg]
+        for i in gone:
+            del objects[i]
+        return bool(gone)
     if k == "fill":
         o = objects.get(op.get("id"))
         if not o or o.get("f", "") == op.get("f", ""):
@@ -111,6 +116,8 @@ def outline(o):
     k, p = o["k"], o["p"]
     if k in ("stroke", "line"):
         return list(p)
+    if k == "poly":
+        return list(p) + list(p[:2])
     if k == "rect":
         x0, y0, x1, y1 = p
         return [x0, y0, x1, y0, x1, y1, x0, y1, x0, y0]
@@ -165,13 +172,3 @@ def erase_pieces(o, x, y, r, max_pts=1400):
     dense = _dense(pts, max(2.0, rr / 2))
     keep = [math.hypot(px - x, py - y) > rr for px, py in dense]
     return None if all(keep) else _runs(dense, keep, max_pts)
-
-
-def clip_pieces(o, x0, y0, x1, y1, max_pts=1400):
-    """Clip `o` to a rectangle: keep only the parts inside it. None = not clippable (text/note/image)."""
-    pts = outline(o)
-    if pts is None:
-        return None
-    x0, x1, y0, y1 = min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
-    dense = _dense(pts, 2.0)
-    return _runs(dense, [x0 <= px <= x1 and y0 <= py <= y1 for px, py in dense], max_pts)

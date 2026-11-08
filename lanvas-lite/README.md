@@ -6,8 +6,8 @@ the client uses **PyQt6** (`pip install PyQt6`, once). No internet is needed at 
 | File | Role | Lines |
 |---|---|---|
 | `common.py` | message framing, password proof, board-op reducer, eraser/clip geometry | ~180 |
-| `server.py` | asyncio TCP server: rooms, roles, auth, ordering, undo, persistence, logs | ~690 |
-| `client.py` | PyQt6 GUI (custom-painted board) + network thread with auto-reconnect | ~1980 |
+| `server.py` | asyncio TCP server: rooms, pages, roles, bans, auth, ordering, undo, persistence, logs | ~790 |
+| `client.py` | PyQt6 GUI (custom-painted board, layers, pages) + network thread with auto-reconnect | ~2560 |
 | `test_lanvas.py` | protocol tests against a real server process | ~190 |
 | `build.py` | PyInstaller build of the two executables | 6 |
 

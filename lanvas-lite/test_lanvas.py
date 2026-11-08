@@ -440,3 +440,72 @@ def test_presentation_relay(server):
     assert c.first["present"]["by"] == "alice"       # late joiners follow too
     a.s.close()                                     # presenter leaves: presentation ends
     assert b.until(lambda m: m["t"] == "present")["by"] is None
+
+
+def rect(i, pg="main", **kw):
+    return {"id": i, "k": "rect", "c": "#000000", "w": 2, "p": [0, 0, 50, 50], "pg": pg, **kw}
+
+
+def test_pages_links_and_page_clear(server):
+    port, *_ = server
+    a = Bot(port, "alice", create=True)
+    assert [p["id"] for p in a.first["pages"]] == ["main"]
+    a.send(t="page_add", name="Ideas")
+    pid = next(p["id"] for p in a.until(lambda m: m["t"] == "pages")["pages"] if p["name"] == "Ideas")
+    a.send(t="op", op={"k": "add", "obj": rect("on2", pg=pid)})
+    a.send(t="op", op={"k": "add", "obj": {**rect("btn"), "k": "button", "s": "Go", "ln": pid}})
+    assert a.until(lambda m: is_op("add")(m) and m["op"]["obj"]["id"] == "btn")["op"]["obj"]["ln"] == pid
+    a.send(t="op", op={"k": "add", "obj": rect("bad", pg="nope")})
+    assert a.until(lambda m: m["t"] == "error")["code"] == "NOT_ALLOWED"
+    a.send(t="clear", pg=pid)                        # clears only that page
+    assert a.until(is_op("clear"))["op"]["pg"] == pid
+    a.send(t="resync")
+    assert ids(a.until(lambda m: m["t"] == "snap")["objects"]) == ["btn"]
+
+
+def test_lock_move_resize_and_polygon(server):
+    port, *_ = server
+    a = Bot(port, "alice", create=True)
+    a.send(t="op", op={"k": "add", "obj": rect("r")})
+    a.send(t="op", op={"k": "set", "id": "r", "attrs": {"p": [10, 10, 90, 70]}})      # move/resize
+    assert a.until(is_op("set"))["op"]["attrs"]["p"] == [10, 10, 90, 70]
+    a.send(t="op", op={"k": "set", "id": "r", "attrs": {"p": [1, 2]}})                # wrong shape for a rect
+    assert a.until(lambda m: m["t"] == "error")["code"] == "NOT_ALLOWED"
+    a.send(t="op", op={"k": "set", "id": "r", "attrs": {"lk": True}})
+    a.until(lambda m: is_op("set")(m) and m["op"]["attrs"] == {"lk": True})
+    a.send(t="op", op={"k": "del", "id": "r"})
+    assert a.until(lambda m: m["t"] == "error")["text"] == "That layer is locked"
+    a.send(t="op", op={"k": "add", "obj": {**rect("pg"), "k": "poly", "p": [0, 0, 40, 0, 20, 30], "f": "#00ff00"}})
+    assert a.until(is_op("add"))["op"]["obj"]["k"] == "poly"
+
+
+def test_merge_layers_into_group(server):
+    port, *_ = server
+    a = Bot(port, "alice", create=True)
+    add(a, "s1")
+    add(a, "s2")
+    group = {"id": "g", "k": "group", "c": "#112233", "w": 3, "p": [1, 2, 3, 4], "items": [stroke("s1"), stroke("s2")]}
+    a.send(t="op", op={"k": "repl", "rid": "m1", "del": ["s1", "s2"], "add": [group]})
+    got = a.until(is_op("repl"))["op"]
+    assert got["del"] == ["s1", "s2"] and ids(got["add"][0]["items"]) == ["s1", "s2"]
+    a.send(t="op", op={"k": "set", "id": "g", "attrs": {"cl": True, "a": 50}})
+    assert a.until(is_op("set"))["op"]["attrs"] == {"cl": True, "a": 50}
+
+
+def test_ban_user_and_ip(server):
+    port, *_ = server
+    a = Bot(port, "alice", create=True)
+    code = a.first["room"]
+    b = Bot(port, "bob", room=code)
+    assert a.until(lambda m: m["t"] == "bans")["bans"] == {"users": [], "ips": []}
+    a.send(t="ban", user="bob")
+    assert b.until(lambda m: m["t"] == "error")["code"] == "KICKED"
+    assert a.until(lambda m: m["t"] == "bans")["bans"]["users"] == ["bob"]
+    assert Bot(port, "bob", room=code, token=b.token).first["code"] == "BANNED"
+    a.send(t="unban", user="bob")
+    a.until(lambda m: m["t"] == "bans" and not m["bans"]["users"])
+    c = Bot(port, "carol", room=code)
+    a.send(t="ban", user="carol", ip=True)           # carol shares alice's IP (127.0.0.1): refused
+    assert a.until(lambda m: m["t"] == "error")["code"] == "NOT_ALLOWED"
+    c.send(t="ban", user="alice")                    # editors can't ban
+    assert c.until(lambda m: m["t"] == "error")["code"] == "NOT_ALLOWED"
