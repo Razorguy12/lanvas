@@ -40,17 +40,25 @@ def rooms(port):
 
 class Bot:
     def __init__(self, port, user, room=None, password="", create=False, role="editor", token="",
-                 private=False, recover=True):
+                 private=False, recover=True, want=None, approval=False, wait=False):
         self.s = socket.create_connection(("127.0.0.1", port), timeout=3)
         hello = {"t": "hello", "user": user, "token": token, "room": room or ""}
+        if want:
+            hello["want"] = want
         if create:
             salt = os.urandom(16).hex() if password else ""
             hello.update(create=True, role=role, salt=salt, key=derive_key(password, salt) if password else "",
-                         private=private)
+                         private=private, approval=approval)
         self.s.sendall(pack(hello))
         m = recv_msg(self.s)
         if m["t"] == "challenge":
             self.s.sendall(pack({"t": "auth", "proof": proof(derive_key(password, m["salt"]), m["nonce"])}))
+            m = recv_msg(self.s)
+        if m["t"] == "waiting":
+            self.waited = m
+            if wait:                        # caller lets someone approve, then calls finish()
+                self.first = m
+                return
             m = recv_msg(self.s)
         self.asked = None
         if m["t"] == "recover":
@@ -59,6 +67,10 @@ class Bot:
             m = recv_msg(self.s)
         self.first = m
         self.token = m.get("you", {}).get("token", "")
+
+    def finish(self):
+        self.first = self.until(lambda m: m["t"] in ("welcome", "error"))
+        return self.first
 
     def send(self, **m):
         self.s.sendall(pack(m))
@@ -161,6 +173,8 @@ def test_undo_redo_is_per_user(server):
     assert b.until(is_op("del"))["op"]["id"] == "a1"
     a.send(t="redo")
     assert b.until(is_op("add"))["op"]["obj"]["id"] == "a1"
+    a.send(t="role", user="bob", role="admin")      # only admins may erase other people's work
+    b.until(lambda m: m["t"] == "users" and any(u["name"] == "bob" and u["role"] == "admin" for u in m["users"]))
     b.send(t="op", op={"k": "del", "id": "a1"})     # bob erases alice's stroke...
     b.until(is_op("del"))
     a.send(t="undo")                                # ...so alice's undo has nothing valid: skipped
@@ -216,11 +230,11 @@ def test_fill_and_undo(server):
     a = Bot(port, "alice", create=True)
     a.send(t="op", op={"k": "add", "obj": {"id": "r1", "k": "rect", "c": "#000000", "w": 2, "p": [0, 0, 50, 50]}})
     a.send(t="op", op={"k": "fill", "id": "r1", "f": "#ff0000"})
-    assert a.until(is_op("fill"))["op"]["f"] == "#ff0000"
+    assert a.until(is_op("set"))["op"]["attrs"] == {"f": "#ff0000"}      # fill is broadcast as a "set"
     a.send(t="op", op={"k": "fill", "id": "r1", "f": "red"})
     assert a.until(lambda m: m["t"] == "error")["code"] == "NOT_ALLOWED"
     a.send(t="undo")
-    assert a.until(is_op("fill"))["op"]["f"] == ""
+    assert a.until(is_op("set"))["op"]["attrs"] == {"f": ""}
 
 
 def test_area_erase_is_one_undoable_op(server):
@@ -273,21 +287,21 @@ def test_private_messages(server):
     assert any(x["text"] == "psst" for x in b.until(lambda m: m["t"] == "snap")["chat"])
 
 
-def test_custom_code_and_closed_room_recovery(server):
+def test_code_is_assigned_and_closed_room_recovery(server):
     port, *_ = server
     a = Bot(port, "alice", create=True, room="MYROOM")
-    assert a.first["room"] == "MYROOM"
-    assert Bot(port, "x", create=True, room="MYROOM").first["code"] == "ROOM_EXISTS"
+    code = a.first["room"]
+    assert code != "MYROOM" and len(code) == 6          # the creator can't choose the code
     add(a, "k1")
     a.until(is_op("add"))
     a.s.close()
     time.sleep(7)                                    # grace (1 s) passes on a 1 s housekeeping tick
-    assert "MYROOM" not in rooms(port)               # closed rooms are not listed
-    b = Bot(port, "bob", room="MYROOM")              # reopen: asked, chooses the saved version
+    assert code not in rooms(port)                   # closed rooms are not listed
+    b = Bot(port, "bob", room=code)                  # reopen: asked, chooses the saved version
     assert b.asked and b.asked["objects"] == 1 and ids(b.first["objects"]) == ["k1"]
     b.s.close()
     time.sleep(7)
-    c = Bot(port, "alice", room="MYROOM", create=True, token=a.token, recover=False)   # start fresh
+    c = Bot(port, "alice", room=code, token=a.token, recover=False)   # start fresh
     assert c.asked and c.first["objects"] == [] and c.first["host"] == "alice"
 
 
@@ -343,3 +357,86 @@ def test_clients_told_when_server_stops_and_restarts(server):
     finally:
         p.terminate()
         p.wait()
+
+
+def test_editors_erase_only_their_own_work_admins_any(server):
+    port, *_ = server
+    a = Bot(port, "alice", create=True)
+    code = a.first["room"]
+    b, c = Bot(port, "bob", room=code), Bot(port, "carol", room=code)
+    add(a, "A1")
+    b.until(is_op("add"))
+    b.send(t="op", op={"k": "del", "id": "A1"})
+    assert b.until(lambda m: m["t"] == "error")["text"] == "You can only erase your own work"
+    b.send(t="op", op={"k": "repl", "rid": "x", "del": ["A1"], "add": []})
+    assert b.until(lambda m: m["t"] == "error")["code"] == "NOT_ALLOWED"
+    b.send(t="op", op={"k": "set", "id": "A1", "attrs": {"h": True}})
+    assert b.until(lambda m: m["t"] == "error")["code"] == "NOT_ALLOWED"
+    b.send(t="save", name="by-editor")               # editors may save versions
+    assert b.until(lambda m: m["t"] == "checks")["checks"][0]["name"] == "by-editor"
+    a.send(t="role", user="carol", role="admin")
+    c.until(lambda m: m["t"] == "users" and any(u["name"] == "carol" and u["role"] == "admin" for u in m["users"]))
+    c.send(t="op", op={"k": "repl", "rid": "y", "del": ["A1"], "add": [{**stroke("P1"), "src": "A1"}]})
+    got = b.until(is_op("repl"))["op"]
+    assert got["add"][0]["u"] == "alice"             # pieces keep the original author
+    c.send(t="role", user="alice", role="viewer")     # admins can't demote the host
+    assert c.until(lambda m: m["t"] == "error")["code"] == "NOT_ALLOWED"
+
+
+def test_design_attrs_and_undo(server):
+    port, *_ = server
+    a = Bot(port, "alice", create=True)
+    add(a, "s1")
+    a.send(t="op", op={"k": "set", "id": "s1", "attrs": {"h": True, "c": "#00ff00", "w": 9}})
+    assert a.until(is_op("set"))["op"]["attrs"] == {"h": True, "c": "#00ff00", "w": 9}
+    a.send(t="op", op={"k": "set", "id": "s1", "attrs": {"w": 99}})
+    assert a.until(lambda m: m["t"] == "error")["code"] == "NOT_ALLOWED"
+    a.send(t="undo")
+    assert a.until(is_op("set"))["op"]["attrs"] == {"h": False, "c": "#112233", "w": 3}
+
+
+def test_access_request_at_the_door(server):
+    port, *_ = server
+    a = Bot(port, "alice", create=True, approval=True)
+    code = a.first["room"]
+    b = Bot(port, "bob", room=code, want="editor", wait=True)
+    assert b.first["t"] == "waiting"
+    req = a.until(lambda m: m["t"] == "req")
+    assert req["user"] == "bob" and req["role"] == "editor"
+    a.send(t="grant", user="bob", role="viewer")     # host may grant a different role
+    w = b.finish()
+    assert w["t"] == "welcome" and next(u for u in w["users"] if u["name"] == "bob")["role"] == "viewer"
+    e = Bot(port, "eve", room=code, wait=True)
+    a.until(lambda m: m["t"] == "req" and m["user"] == "eve")
+    a.send(t="refuse", user="eve")
+    assert e.finish()["code"] == "DENIED"
+    b.send(t="ask", role="editor")                  # in-room request
+    assert a.until(lambda m: m["t"] == "req" and m["user"] == "bob")["inroom"]
+
+
+def test_admin_request_in_open_room_needs_approval(server):
+    port, *_ = server
+    a = Bot(port, "alice", create=True, role="viewer")
+    b = Bot(port, "bob", room=a.first["room"], want="admin", wait=True)
+    assert b.first["t"] == "waiting"
+    a.until(lambda m: m["t"] == "req")
+    a.send(t="grant", user="bob", role="admin")
+    assert next(u for u in b.finish()["users"] if u["name"] == "bob")["role"] == "admin"
+    c = Bot(port, "carol", room=a.first["room"], want="editor")       # open room: default role applies
+    assert next(u for u in c.first["users"] if u["name"] == "carol")["role"] == "viewer"
+
+
+def test_presentation_relay(server):
+    port, *_ = server
+    a = Bot(port, "alice", create=True)
+    b = Bot(port, "bob", room=a.first["room"])
+    b.send(t="present", on=True)
+    assert b.until(lambda m: m["t"] == "error")["code"] == "NOT_ALLOWED"
+    a.send(t="present", on=True, v={"z": 4, "cx": 100, "cy": 50})
+    assert b.until(lambda m: m["t"] == "present")["by"] == "alice"
+    a.send(t="view", v={"z": 5, "cx": 300, "cy": 200})
+    assert b.until(lambda m: m["t"] == "view")["v"]["cx"] == 300
+    c = Bot(port, "carol", room=a.first["room"])
+    assert c.first["present"]["by"] == "alice"       # late joiners follow too
+    a.s.close()                                     # presenter leaves: presentation ends
+    assert b.until(lambda m: m["t"] == "present")["by"] is None

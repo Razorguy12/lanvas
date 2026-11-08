@@ -17,7 +17,7 @@ import signal
 import socket
 import time
 
-from common import PORT, apply_op, pack, proof, read_msg
+from common import ATTRS, PORT, apply_op, pack, proof, read_msg
 
 COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#008080", "#9a6324", "#800000"]
 KINDS = {"stroke", "line", "rect", "oval", "text", "note", "image"}
@@ -31,6 +31,8 @@ HEX_RE = re.compile(r"^[0-9a-f]{0,128}$")
 HEARTBEAT, TIMEOUT = 5, 15            # ping every 5 s; drop a client silent for 15 s
 MAX_OBJECTS, MAX_POINTS, MAX_CHAT, MAX_CHECKS, MAX_UNDO, MAX_PIECES = 3000, 1500, 200, 10, 100, 300
 ROOMS, DATA = {}, "data"
+ROLES = ("viewer", "editor", "admin")          # plus "host" (the room's owner)
+APPROVERS = ("host", "admin")
 AUTOSAVE = 120        # seconds between autosaves of a changed room (the "save point")
 GRACE = 30            # an empty room is closed after this long (clients reconnect well within it)
 STARTUP_GRACE = 90    # after a server restart, give clients longer to come back before closing
@@ -44,9 +46,11 @@ class Room:
     restore that last save or start fresh."""
 
     def __init__(self, code, host, salt="", key="", default_role="editor", seq=0, chat=(), checks=(),
-                 users=None, objects=(), private=False, closed=False, saved_at=0, **_ignored):
+                 users=None, objects=(), private=False, closed=False, saved_at=0, approval=False, **_ignored):
         self.code, self.host, self.salt, self.key = code, host, salt, key
         self.default_role, self.seq, self.private, self.closed = default_role, seq, private, closed
+        self.approval, self.waiting = approval, {}   # waiting: name -> (future, wanted role) at the door
+        self.presenter, self.view = None, None
         self.chat, self.checks, self.users = list(chat), list(checks), users or {}
         self.objects = {o["id"]: o for o in objects}
         self.seen = set(self.objects)             # every object/op id ever accepted (duplicate filter)
@@ -56,7 +60,7 @@ class Room:
 
     def dump(self):
         d = {k: getattr(self, k) for k in ("code", "host", "salt", "key", "default_role", "seq", "chat",
-                                           "checks", "users", "private", "closed", "saved_at")}
+                                           "checks", "users", "private", "closed", "saved_at", "approval")}
         d["objects"] = list(self.objects.values())
         return d
 
@@ -135,6 +139,7 @@ def visible(c, user):
 def snapshot(room, user):
     """Complete board + participant + chat state: sent on join, reconnect, resync and restore."""
     return {"seq": room.seq, "objects": list(room.objects.values()), "users": users_info(room),
+            "present": {"by": room.presenter, "view": room.view} if room.presenter else None,
             "chat": [c for c in room.chat if visible(c, user)],
             "checks": [{"name": c["name"], "ts": c["ts"]} for c in room.checks]}
 
@@ -162,7 +167,7 @@ def say(room, user, text, to=None):
 
 def room_list():
     """Rooms anyone may see in the lobby: open and not private."""
-    return [{"code": r.code, "host": r.host, "online": len(r.conns), "locked": bool(r.key)}
+    return [{"code": r.code, "host": r.host, "online": len(r.conns), "locked": bool(r.key), "approval": r.approval}
             for r in ROOMS.values() if not r.private and not r.closed]
 
 
@@ -192,7 +197,9 @@ def replay_ops(act, data, redo):
         return [{"k": "add", "obj": o} if do == "add" else {"k": "del", "id": o["id"]} for o in data]
     if act == "fill":
         return [{"k": "fill", "id": i, "f": new if redo else old} for i, old, new in data]
-    olds, news = data                                    # "repl" (area eraser)
+    if act == "set":
+        return [{"k": "set", "id": i, "attrs": new if redo else old} for i, old, new in data]
+    olds, news = data                                    # "repl" (area eraser, clip)
     gone, back = (olds, news) if redo else (news, olds)
     return [{"k": "repl", "del": [o["id"] for o in gone], "add": back}]
 
@@ -213,13 +220,49 @@ def undo_redo(room, me, redo):
             return
 
 
+def clean_attrs(a):
+    """Validate design-page attributes; None if anything is wrong."""
+    if not isinstance(a, dict) or not a or set(a) - set(ATTRS):
+        return None
+    ok = {"c": lambda v: isinstance(v, str) and COLOR_RE.match(v),
+          "w": lambda v: isinstance(v, int) and 1 <= v <= 40,
+          "f": lambda v: isinstance(v, str) and (v == "" or COLOR_RE.match(v)),
+          "h": lambda v: isinstance(v, bool)}
+    return a if all(ok[k](v) for k, v in a.items()) else None
+
+
+def may_change_role(room, actor, target, new):
+    """Host: anyone but themself. Admin: may promote/demote editors and viewers (up to admin),
+    but may not touch other admins or the host."""
+    if target == room.host or target not in room.users or new not in ROLES:
+        return False
+    if actor == room.host:
+        return True
+    return room.role(actor) == "admin" and room.role(target) != "admin"
+
+
+def set_role(room, user, role, by):
+    room.users[user]["role"] = role
+    room.dirty = True
+    bcast(room, {"t": "users", "users": users_info(room)})
+    log.info("[%s] %s made %s %s", room.code, by, user, role)
+
+
+def approvers(room):
+    return [c for n, c in room.conns.items() if room.role(n) in APPROVERS]
+
+
 def handle(room, conn, m):
     me, t = conn.user, m.get("t")
-    host = me == room.host
-    can_edit = room.role(me) in ("host", "editor")
+    role = room.role(me)
+    host, admin, can_edit = me == room.host, role in APPROVERS, role in ("host", "admin", "editor")
 
     def deny(text):
         send(conn, {"t": "error", "code": "NOT_ALLOWED", "text": text})
+
+    def mine(o):
+        """Editors may only erase/change their own work; admins and the host may change anyone's."""
+        return admin or o.get("u") == me
 
     if t == "pong":
         return
@@ -233,7 +276,20 @@ def handle(room, conn, m):
         bcast(room, {"t": "cur", "u": me, "x": m.get("x"), "y": m.get("y")}, skip=conn)
     elif t == "resync":
         send(conn, {"t": "snap", **snapshot(room, me)})
-    elif t in ("op", "live", "undo", "redo") and not can_edit:
+    elif t == "ask":            # in-room request for a different role
+        want = m.get("role")
+        if want not in ROLES or host:
+            return deny("Invalid request")
+        for c in approvers(room):
+            send(c, {"t": "req", "user": me, "role": want, "inroom": True})
+        if not approvers(room):
+            deny("No host or admin is online to approve")
+        log.info("[%s] %s asked for %s", room.code, me, want)
+    elif t == "view":           # presenter's viewport, relayed to followers
+        if room.presenter == me and isinstance(m.get("v"), dict):
+            room.view = {k: m["v"].get(k) for k in ("z", "cx", "cy")}
+            bcast(room, {"t": "view", "v": room.view}, skip=conn)
+    elif t in ("op", "live", "undo", "redo", "save") and not can_edit:
         deny("You have view-only access")
     elif t == "live":       # in-progress stroke preview: relayed, never stored or sequenced
         o = clean_obj(m.get("o") or {}, me)
@@ -255,31 +311,42 @@ def handle(room, conn, m):
             push_undo(room, me, ("add", [obj]))
         elif k == "del":
             old = room.objects.get(op.get("id"))
+            if old and not mine(old):
+                send(conn, {"t": "ack", "id": "d:" + old["id"]})
+                return deny("You can only erase your own work")
             if old and commit(room, {"k": "del", "id": old["id"]}, me):
                 push_undo(room, me, ("del", [old]))
             else:
                 send(conn, {"t": "ack", "id": "d:" + str(op.get("id"))})
-        elif k == "fill":
-            old, f = room.objects.get(op.get("id")), op.get("f", "")
-            if not (isinstance(f, str) and (f == "" or COLOR_RE.match(f))):
-                return deny("Invalid fill colour")
-            prev = old.get("f", "") if old else ""
-            if old and commit(room, {"k": "fill", "id": old["id"], "f": f}, me):
-                push_undo(room, me, ("fill", [(old["id"], prev, f)]))
+        elif k in ("fill", "set"):
+            old = room.objects.get(op.get("id"))
+            attrs = clean_attrs({"f": op.get("f", "")} if k == "fill" else op.get("attrs"))
+            if attrs is None:
+                return deny("Invalid change")
+            if old and not mine(old):
+                send(conn, {"t": "ack", "id": k[0] + ":" + old["id"]})
+                return deny("You can only change your own work")
+            prev = {a: old.get(a, ATTRS[a]) for a in attrs} if old else {}
+            if old and commit(room, {"k": "set", "id": old["id"], "attrs": attrs}, me):
+                push_undo(room, me, ("set", [(old["id"], prev, attrs)]))
             else:
-                send(conn, {"t": "ack", "id": "f:" + str(op.get("id"))})
-        elif k == "repl":           # area eraser: some objects replaced by their remaining pieces
+                send(conn, {"t": "ack", "id": k[0] + ":" + str(op.get("id"))})
+        elif k == "repl":           # area eraser / clip: objects replaced by their remaining pieces
             rid, dels, adds = str(op.get("rid", ""))[:40], op.get("del"), op.get("add")
             if not (rid and isinstance(dels, list) and isinstance(adds, list)
                     and len(dels) <= MAX_PIECES and len(adds) <= MAX_PIECES):
                 return deny("Invalid erase")
             if "r:" + rid in room.seen:
                 return send(conn, {"t": "ack", "id": "r:" + rid})
-            adds = [clean_obj(o, me) if isinstance(o, dict) else None for o in adds]
+            olds = [room.objects[i] for i in dels if isinstance(i, str) and i in room.objects]
+            if not all(mine(o) for o in olds):
+                send(conn, {"t": "ack", "id": "r:" + rid})
+                return deny("You can only erase your own work")
+            authors = {o["id"]: o.get("u", me) for o in olds}   # pieces keep the original author
+            adds = [clean_obj(o, authors.get(o.get("src"), me)) if isinstance(o, dict) else None for o in adds]
             if None in adds or any(o["k"] == "image" for o in adds) or any(o["id"] in room.seen for o in adds) \
                     or len(room.objects) + len(adds) > MAX_OBJECTS + len(dels):
                 return deny("Invalid erase")
-            olds = [room.objects[i] for i in dels if isinstance(i, str) and i in room.objects]
             room.seen |= {"r:" + rid} | {o["id"] for o in adds}
             op = {"k": "repl", "rid": rid, "del": [o["id"] for o in olds], "add": adds}
             if commit(room, op, me):
@@ -288,31 +355,46 @@ def handle(room, conn, m):
                 send(conn, {"t": "ack", "id": "r:" + rid})
     elif t in ("undo", "redo"):
         undo_redo(room, me, t == "redo")
-    elif not host:
-        deny("Only the host can do that")
-    elif t == "clear":
-        if room.objects:
-            push_undo(room, me, ("del", list(room.objects.values())))
-            commit(room, {"k": "clear"}, me)
-            log.info("[%s] %s cleared the board", room.code, me)
-    elif t == "role" and m.get("user") in room.users and m["user"] != room.host \
-            and m.get("role") in ("editor", "viewer"):
-        room.users[m["user"]]["role"] = m["role"]
-        room.dirty = True
-        bcast(room, {"t": "users", "users": users_info(room)})
-        log.info("[%s] %s made %s %s", room.code, me, m["user"], m["role"])
-    elif t == "kick" and m.get("user") in room.conns and m["user"] != room.host:
-        target = room.conns[m["user"]]
-        send(target, {"t": "error", "code": "KICKED", "text": "The host removed you", "fatal": True})
-        target.w.close()
-        log.info("[%s] %s kicked %s", room.code, me, m["user"])
-    elif t == "save":
+    elif t == "save":           # editors and above
         name = str(m.get("name") or time.strftime("%H:%M:%S"))[:40]
         room.checks.append({"name": name, "ts": int(time.time()), "objects": list(room.objects.values())})
         del room.checks[:-MAX_CHECKS]
         room.dirty = True
         bcast(room, {"t": "checks", "checks": snapshot(room, me)["checks"]})
         log.info("[%s] %s saved version %r", room.code, me, name)
+    elif not admin:
+        deny("Only the host or an admin can do that")
+    elif t == "clear":
+        if room.objects:
+            push_undo(room, me, ("del", list(room.objects.values())))
+            commit(room, {"k": "clear"}, me)
+            log.info("[%s] %s cleared the board", room.code, me)
+    elif t == "role":
+        if not may_change_role(room, me, m.get("user"), m.get("role")):
+            return deny("You can't change that person's role")
+        set_role(room, m["user"], m["role"], me)
+    elif t in ("grant", "refuse"):      # answer to an access request (at the door or in the room)
+        user, want = m.get("user"), m.get("role")
+        if user in room.waiting:
+            fut, _ = room.waiting[user]
+            if t == "grant" and (want not in ROLES or (want == "admin" and not host and role != "admin")):
+                return deny("Invalid role")
+            if not fut.done():
+                fut.set_result((want, me) if t == "grant" else (None, me))
+        elif user in room.users and t == "grant":
+            if not may_change_role(room, me, user, want):
+                return deny("You can't give that role")
+            set_role(room, user, want, me)
+        elif user in room.conns:
+            send(room.conns[user], {"t": "error", "code": "REFUSED", "text": f"{me} declined your request"})
+        for c in approvers(room):
+            send(c, {"t": "reqdone", "user": user})
+    elif t == "kick" and m.get("user") in room.conns and m["user"] != room.host \
+            and (host or room.role(m["user"]) != "admin"):
+        target = room.conns[m["user"]]
+        send(target, {"t": "error", "code": "KICKED", "text": f"{me} removed you", "fatal": True})
+        target.w.close()
+        log.info("[%s] %s kicked %s", room.code, me, m["user"])
     elif t == "restore" and isinstance(m.get("idx"), int) and 0 <= m["idx"] < len(room.checks):
         room.objects = {o["id"]: o for o in room.checks[m["idx"]]["objects"]}
         room.seen |= set(room.objects)
@@ -320,6 +402,13 @@ def handle(room, conn, m):
         room.undo, room.redo, room.dirty = {}, {}, True
         bcast_snap(room)
         log.info("[%s] %s restored version %r", room.code, me, room.checks[m["idx"]]["name"])
+    elif t == "present":        # presentation mode: everyone follows the presenter's view
+        if m.get("on"):
+            room.presenter, room.view = me, m.get("v") if isinstance(m.get("v"), dict) else None
+        elif room.presenter in (me, None) or host:
+            room.presenter, room.view = None, None
+        bcast(room, {"t": "present", "by": room.presenter, "view": room.view})
+        log.info("[%s] presentation %s by %s", room.code, "started" if room.presenter else "stopped", me)
 
 
 # ---------- connections ----------
@@ -366,21 +455,18 @@ async def login(conn, reader):
     if h.get("t") != "hello" or not NAME_RE.match(user):
         return await fail("BAD_NAME", "Name must be 1-20 letters, digits, space . _ -")
     code = str(h.get("room", "")).strip().upper()
-    if h.get("create") and not (code in ROOMS and ROOMS[code].closed):
+    if h.get("create"):                 # the server always assigns the code
         salt, key = str(h.get("salt", "")), str(h.get("key", ""))
         if not (HEX_RE.match(salt) and HEX_RE.match(key)) or bool(salt) != bool(key):
             return await fail("BAD_AUTH", "Malformed password data")
-        if code and code in ROOMS:
-            return await fail("ROOM_EXISTS", "A room with that code is already open; untick Create to join it")
-        if code and not CODE_RE.match(code):
-            return await fail("BAD_CODE", "Room code must be 4-8 letters/digits")
-        code = code or new_code()
+        code = new_code()
         room = ROOMS[code] = Room(code, user, salt, key, "viewer" if h.get("role") == "viewer" else "editor",
-                                  private=bool(h.get("private")))
+                                  private=bool(h.get("private")), approval=bool(h.get("approval")))
         room.empty_since = None
         save_room(room)
-        log.info("[%s] created by %s from %s (%s%s)", code, user, conn.peer,
-                 "private" if room.private else "public", ", password" if key else "")
+        log.info("[%s] created by %s from %s (%s%s%s)", code, user, conn.peer,
+                 "private" if room.private else "public", ", password" if key else "",
+                 ", approval required" if room.approval else "")
     else:
         room = ROOMS.get(code)
         if not room:
@@ -396,7 +482,37 @@ async def login(conn, reader):
         same = bool(token) and hmac.compare_digest(token, u["token"])    # reconnect with session token
         if (user in room.conns or (user == room.host and not room.key)) and not same:
             return await fail("NAME_TAKEN", "That name is in use in this room")
+    elif user in room.waiting:
+        return await fail("NAME_TAKEN", "Someone with that name is already waiting to enter")
     conn.user = user
+    want = h.get("want") if h.get("want") in ROLES else None
+    if not u and user != room.host and (room.approval or want == "admin"):
+        # Knock at the door: a host or admin must let a newcomer in (and decides the role).
+        if room.closed or not approvers(room):
+            return await fail("NO_APPROVER", "No host or admin is online to let you in")
+        want = want or room.default_role
+        fut = asyncio.get_running_loop().create_future()
+        room.waiting[user] = (fut, want)
+        send(conn, {"t": "waiting", "text": f"Waiting for the host or an admin to let you in as {want}..."})
+        for c in approvers(room):
+            send(c, {"t": "req", "user": user, "role": want, "inroom": False})
+        log.info("[%s] %s (%s) asks to enter as %s", room.code, user, conn.peer, want)
+        try:
+            granted, by = await asyncio.wait_for(fut, 300)
+        except asyncio.TimeoutError:
+            granted, by = None, "nobody"
+        finally:
+            room.waiting.pop(user, None)
+            for c in approvers(room):
+                send(c, {"t": "reqdone", "user": user})
+        if not granted:
+            log.info("[%s] %s was not let in (by %s)", room.code, user, by)
+            send(conn, {"t": "error", "code": "DENIED", "text": "Your request to enter was declined"})
+            return None
+        log.info("[%s] %s let %s in as %s", room.code, by, user, granted)
+        want = granted
+    elif not u and want and want != room.default_role and want != "admin":
+        want = None                     # open room: the host's default applies; ask for more once inside
     if room.closed:
         await reopen(conn, reader, room)
     if u:
@@ -404,7 +520,7 @@ async def login(conn, reader):
         if old:                    # stale half-dead connection from the same user: replace it
             old.w.close()
     else:
-        u = room.users[user] = {"role": room.default_role, "token": secrets.token_hex(16),
+        u = room.users[user] = {"role": want or room.default_role, "token": secrets.token_hex(16),
                                 "color": COLORS[len(room.users) % len(COLORS)]}
     conn.room = room
     room.conns[user] = conn
@@ -439,6 +555,9 @@ async def serve(reader, writer):
             bcast(room, {"t": "users", "users": users_info(room)})
             say(room, "", f"{conn.user} left")      # room stays alive for reconnects
             log.info("[%s] %s left (%d online)", room.code, conn.user, len(room.conns))
+            if room.presenter == conn.user:
+                room.presenter, room.view = None, None
+                bcast(room, {"t": "present", "by": None, "view": None})
             if not room.conns:
                 room.empty_since = time.monotonic()
         writer.close()

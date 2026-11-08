@@ -3,7 +3,8 @@
 ## 1. Architecture
 Client-server over TCP/IP on a LAN; no internet needed. One server process (`server.py`) hosts any number of
 rooms. Each room's authoritative state lives on the server: the ordered object list, participants, chat, saved
-versions. Clients (`client.py`) hold a replica and render it.
+versions. Clients (`client.py`, PyQt6) hold a replica and paint it themselves (a custom QWidget with a zoom/pan
+transform; the same renderer produces the PNG/JPG/PDF exports, so exports match the screen).
 
 ```
  client A ─┐                       ┌─ room ABC123: objects, seq, users, chat, versions
@@ -19,17 +20,20 @@ capped (8 KB before login, 1 MB from clients afterward) so a bad peer can't exha
 | Direction | Type | Fields / meaning |
 |---|---|---|
 | C→S | `list` | (instead of `hello`) → S→C `rooms`: open, non-private rooms `{code, host, online, locked}` |
-| C→S | `hello` | `user, room` or `create:true, salt, key, role, private` (+ optional chosen `room` code); optional session `token` |
+| C→S | `hello` | `user, room` (+ optional `want` role) or `create:true, salt, key, role, private, approval` (code is always server-assigned); optional session `token` |
+| S→C | `waiting` | approval room (or an `admin` request): waiting at the door for the host/an admin |
+| S→C / C→S | `req` / `grant{user,role}` `refuse{user}` `reqdone` | access requests to the host and admins and their answers; C→S `ask{role}` = in-room request |
+| C→S→C | `present{on,v}` `view{v}` | presentation mode (admin+): `v = {z, cx, cy}` = presenter's zoom level and view centre |
 | S→C | `challenge` | `salt, nonce` (only for password rooms) |
 | C→S | `auth` | `proof` = HMAC-SHA256(key, nonce); the password is never sent |
 | S→C→S | `recover` | reopening a closed room: server sends `ts, objects` of its last save; client answers `use:true/false` |
 | S→C | `welcome` | `room, you{name,token,color}` + full snapshot (below) |
-| C→S | `op` | `{k:"add",obj}`, `{k:"del",id}`, `{k:"fill",id,f}` or `{k:"repl",rid,del:[ids],add:[objs]}`; obj = `{id,k,c,w,p,s,f}` (kind, color, width, points, text, fill) |
+| C→S | `op` | `{k:"add",obj}`, `{k:"del",id}`, `{k:"set",id,attrs:{c,w,f,h}}` or `{k:"repl",rid,del:[ids],add:[objs]}`; obj = `{id,k,c,w,p,s,f,h}` (kind, color, width, points, text, fill, hidden); repl pieces carry `src` so they keep the original author |
 | S→C | `op` | the same op plus `seq` (global order) and `by` (author); sent to everyone, sender included |
 | C→S→C | `live` | in-progress stroke/shape preview; relayed to others, never stored or sequenced |
 | C→S→C | `cur` | cursor position, relayed |
 | C→S→C | `chat` | `text` (+ optional `to` = private message) → `{u, ts, text[, to]}`; private ones go only to sender and recipient |
-| C→S | `undo` `redo` `clear` `save{name}` `restore{idx}` `role{user,role}` `kick{user}` `resync` | host-only: clear, save, restore, role, kick |
+| C→S | `undo` `redo` `clear` `save{name}` `restore{idx}` `role{user,role}` `kick{user}` `resync` | save: editor+; clear, restore, role, kick: admin+ |
 | S→C | `snap` | full snapshot: `seq, objects, users, chat, checks` |
 | S→C | `users` `gone` `checks` `ack` `error` `ping` | participants / user left / saved versions / duplicate acknowledged / error / heartbeat |
 
@@ -66,8 +70,14 @@ S→C `bye` = the server is shutting down.
 * Optional room password: stored on the server only as PBKDF2(password, salt); login uses challenge-response, so
   neither the password nor a reusable proof crosses the network at join time. (The derived key is sent once, when
   the host creates the room.) Failed logins are delayed 1 s.
-* Roles: **host** (clear, save, restore, change roles, kick), **editor** (draw/erase/undo), **viewer** (watch + chat).
-  The host picks the default role for newcomers and can change anyone's role live (right-click a participant).
+* Roles: **host/owner** and **admin** (clear, restore, change roles, kick, present, erase or change anyone's work),
+  **editor** (draw, save versions, erase/change **only their own** work), **viewer** (watch + chat). Admins can
+  promote/demote editors and viewers (up to admin) but can't touch other admins or the owner; only the owner can.
+* **Entering:** the room code is always assigned by the server. In an open room newcomers enter with the role the
+  host chose (editor or viewer) and can be promoted later (right-click a participant), or ask with **Request role**.
+  In an **approval** room (host ticks *Approval needed to enter*) a newcomer asks for viewer/editor/admin and waits
+  until the host or an admin accepts (as asked or as another role) or refuses. Asking for admin always needs
+  approval, even in open rooms. Returning members (session token) walk straight in.
   The server checks the role on every message, so a modified client cannot bypass it. All object data is validated
   (kind, color format, size limits, point count, bounds).
 * Each user gets a color; their cursor shows it, and their default pen color matches it. Names are unique per room.
@@ -109,12 +119,37 @@ S→C `bye` = the server is shutting down.
    click. **Undo/Redo** (Ctrl+Z / Ctrl+Y) affect your own actions only.
 5. **Collaborate:** coloured cursors show who is where; the Participants list shows who is online; chat is on the
    right (messages show sender and time).
-   **Image** tool: click where it should go and pick a file. PNG/GIF always work; JPEG, BMP and WebP need Pillow.
+   **Image** tool: click where it should go and pick a file. PNG, JPEG, GIF, BMP and WebP all work.
    Large images are shrunk to 800 px. **Zoom:** the − / 100% / + buttons, Ctrl+wheel (zooms at the pointer) or
    Ctrl + / − / 0. Scroll with the wheel, Shift+wheel or the scrollbars, or pan by dragging with the middle button. Pick a name in **To:** (or right-click a participant → *Message
    privately*) to send a private message only they can see. **Dark mode** toggles the theme (remembered).
-6. **Host tools:** Clear, Save (named version), Restore (pick a version), right-click a participant to switch
-   viewer/editor or kick. **Export SVG** is available to everyone. **Leave** returns to the login screen.
+6. **Host/admin tools:** Clear, Restore (pick a version), right-click a participant to change role or kick, answer
+   access requests (a window pops up). **Save** (named version) is for editors and above. **Export** → SVG, PNG, JPG
+   or PDF , available to everyone; invisible objects are left out.
+7. **Design page:** the **Design** tab, or the ⌖ select tool (V) then click an object. Lists every object (even
+   invisible ones); for the selected one you can make it invisible/visible, change stroke colour, width and fill,
+   **clip** it (drag a rectangle; only the part inside is kept) or delete it. Undo works for all of these.
+8. **Presentation mode:** a host/admin clicks **Present**: everyone goes full screen and follows the presenter's
+   zoom and scrolling. Esc stops presenting (presenter) or leaves (followers; **Follow presentation** rejoins). **Leave** returns to the login screen.
+
+### Interface
+Figma/Canva-style layout: a top bar (room code chip, connection state, undo/redo, zoom, participant avatars,
+Export, Present, ⋯ menu), a floating tool rail on the left (tools, colour swatches, width), the board page on a
+dotted workspace in the middle, and a right panel with **People / Chat / Design** tabs. Rounded white cards with
+soft shadows, hover/pressed states, tooltips that show each shortcut, toasts for feedback, light and dark themes.
+Right-click an object for quick actions; right-click a person to message, change role or kick.
+
+### Keyboard shortcuts (press `?` or F1 in the app for this list)
+| Keys | Action | Keys | Action |
+|---|---|---|---|
+| P E X F L R O T N I V | Pen, Eraser, Erase object, Fill, Line, Rect, Oval, Text, Note, Image, Select/design | 1–8, C | Palette colour, custom colour |
+| [ / ] | Thinner / thicker | Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z | Undo, redo |
+| Del, H | Delete / hide selected object | Ctrl+S, Ctrl+Shift+S | Save version, restore version |
+| Ctrl+Shift+Backspace | Clear board (admin) | Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+1 | Zoom in / out / 100% / fit |
+| Space+drag, middle-drag, wheel | Pan (Ctrl+wheel zooms) | F5, Esc | Present, cancel / leave presentation |
+| Ctrl+D | Dark mode | Alt+1/2/3 | People / Chat / Design tab |
+| / | Focus chat | Ctrl+E | Export |
+| Ctrl+Shift+C | Copy room code | Ctrl+R, Ctrl+Q | Request role, leave room |
 
 ## 7. Requirement coverage and known omissions
 All mandatory requirements (drawing, erasing, color, real-time sync, shared canvas, clear, save/restore,
@@ -122,6 +157,7 @@ session create/join, participants, join/leave notices, user identification, snap
 history, ordering/duplicate/missing handling, reconnection, state recovery, undo/redo) are implemented.
 Extras: shapes (line/rect/oval), text, sticky notes, role-based permissions, password-protected rooms, version
 history, SVG export, live stroke previews, cursors, offline drawing that syncs on reconnect, persistence across
-server restarts, fill, area eraser, public room list, private messages, autosave with room/server recovery,
+server restarts, design page (hide / recolour / resize / clip objects), presentation mode, role requests and
+approval rooms, PNG/JPG/PDF export, fill, area eraser, public room list, private messages, autosave with room/server recovery,
 dark mode, server logs, image upload, zoom/pan. **Not implemented:** image insertion, presentation mode, mind maps/flowchart templates, moving or
 resizing existing objects, UDP auto-discovery of servers, traffic encryption (plain TCP on the LAN).

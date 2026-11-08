@@ -55,6 +55,9 @@ def proof(key_hex, nonce):
     return hmac.new(bytes.fromhex(key_hex), nonce.encode(), "sha256").hexdigest()
 
 
+ATTRS = {"c": "#000000", "w": 1, "f": "", "h": False}     # editable on the design page, with defaults
+
+
 def apply_op(objects, op):
     """Apply one board operation to `objects` (id -> object; dict order is the drawing order).
 
@@ -62,7 +65,8 @@ def apply_op(objects, op):
     op changes nothing. Returns True only if the board actually changed.
         {"k": "add", "obj": {...}}   {"k": "del", "id": "..."}   {"k": "clear"}
         {"k": "fill", "id": "...", "f": "#rrggbb" or ""}          (set an object's fill colour)
-        {"k": "repl", "del": [ids], "add": [objs]}                (area eraser: replace objects by pieces)
+        {"k": "repl", "del": [ids], "add": [objs]}                (area eraser / clip: replace by pieces)
+        {"k": "set", "id": "...", "attrs": {"c", "w", "f", "h"}}  (design page: colour, width, fill, hidden)
     """
     k = op.get("k")
     if k == "add":
@@ -81,6 +85,12 @@ def apply_op(objects, op):
         if not o or o.get("f", "") == op.get("f", ""):
             return False
         objects[o["id"]] = {**o, "f": op.get("f", "")}      # new dict: never mutate copies held by undo
+        return True
+    if k == "set":
+        o, attrs = objects.get(op.get("id")), {a: v for a, v in (op.get("attrs") or {}).items() if a in ATTRS}
+        if not o or all(o.get(a, ATTRS[a]) == v for a, v in attrs.items()):
+            return False
+        objects[o["id"]] = {**o, **attrs}
         return True
     if k == "repl":
         changed = False
@@ -112,26 +122,19 @@ def outline(o):
     return None
 
 
-def erase_pieces(o, x, y, r, max_pts=1400):
-    """Rub out the part of `o` within radius r of (x, y). Returns None if `o` is untouched, otherwise the
-    list of remaining polylines (possibly empty = fully erased). Segments are densified first so the
-    eraser cuts a clean gap even through long straight lines."""
-    pts = outline(o)
-    if pts is None:
-        return None
-    rr = r + o["w"] / 2
+def _dense(pts, step):
+    """Polyline -> list of (x, y) with no gap longer than `step`."""
     xs, ys = pts[0::2], pts[1::2]
-    if x < min(xs) - rr or x > max(xs) + rr or y < min(ys) - rr or y > max(ys) + rr:
-        return None
-    step = max(2.0, rr / 2)
     dense = [(xs[0], ys[0])]
     for i in range(1, len(xs)):
         (ax, ay), bx, by = dense[-1], xs[i], ys[i]
         n = max(1, int(math.hypot(bx - ax, by - ay) / step))
         dense += [(ax + (bx - ax) * j / n, ay + (by - ay) * j / n) for j in range(1, n + 1)]
-    keep = [math.hypot(px - x, py - y) > rr for px, py in dense]
-    if all(keep):
-        return None
+    return dense
+
+
+def _runs(dense, keep, max_pts):
+    """Split the kept points into continuous polylines (closed outlines rejoin across their start)."""
     pieces, run = [], []
     for (px, py), k in zip(dense, keep):
         if k:
@@ -144,5 +147,31 @@ def erase_pieces(o, x, y, r, max_pts=1400):
         pieces.append([v for q in run for v in q])
     loop = dense[0] == dense[-1] and keep[0] and keep[-1]
     if loop and len(pieces) >= 2 and len(pieces[0]) + len(pieces[-1]) <= 2 * max_pts:
-        pieces[0] = pieces.pop() + pieces[0][2:]      # closed outline: the cut-open ends are one piece
+        pieces[0] = pieces.pop() + pieces[0][2:]
     return pieces
+
+
+def erase_pieces(o, x, y, r, max_pts=1400):
+    """Rub out the part of `o` within radius r of (x, y). Returns None if `o` is untouched, otherwise the
+    list of remaining polylines (possibly empty = fully erased). Segments are densified first so the
+    eraser cuts a clean gap even through long straight lines."""
+    pts = outline(o)
+    if pts is None:
+        return None
+    rr = r + o["w"] / 2
+    xs, ys = pts[0::2], pts[1::2]
+    if x < min(xs) - rr or x > max(xs) + rr or y < min(ys) - rr or y > max(ys) + rr:
+        return None
+    dense = _dense(pts, max(2.0, rr / 2))
+    keep = [math.hypot(px - x, py - y) > rr for px, py in dense]
+    return None if all(keep) else _runs(dense, keep, max_pts)
+
+
+def clip_pieces(o, x0, y0, x1, y1, max_pts=1400):
+    """Clip `o` to a rectangle: keep only the parts inside it. None = not clippable (text/note/image)."""
+    pts = outline(o)
+    if pts is None:
+        return None
+    x0, x1, y0, y1 = min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
+    dense = _dense(pts, 2.0)
+    return _runs(dense, [x0 <= px <= x1 and y0 <= py <= y1 for px, py in dense], max_pts)
