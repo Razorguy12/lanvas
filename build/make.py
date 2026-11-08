@@ -44,7 +44,6 @@ def build(name: str, entry: str, gui: bool) -> Path:
         "--paths",
         str(ROOT),
         "--collect-submodules",
-        "cryptography",
     ]
     for module in EXCLUDES:
         command += ["--exclude-module", module]

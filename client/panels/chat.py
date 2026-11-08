@@ -1,4 +1,4 @@
-"""Chat panel: room and private channels, retained history, and per-message send state.
+"""Chat panel: room and private channels, history, and per-message send state.
 
 All user text is HTML-escaped before it reaches the view. A chat message is untrusted input, and it
 must never be able to inject markup or a link into another member's window.
@@ -172,10 +172,6 @@ class ChatPanel(QWidget):
     def _open_owner_menu(self) -> None:
         menu = QMenu(self)
         menu.addAction("Clear room chat…", self._clear_chat)
-        retention = menu.addMenu("Chat retention")
-        retention.addAction("Keep forever", lambda: self._retention({"mode": "forever"}))
-        retention.addAction("Last N messages…", lambda: self._ask_retention("last_n", "messages"))
-        retention.addAction("Last N days…", lambda: self._ask_retention("days", "days"))
         menu.exec(self.owner_menu.mapToGlobal(self.owner_menu.rect().bottomLeft()))
 
     def _clear_chat(self) -> None:
@@ -188,18 +184,6 @@ class ChatPanel(QWidget):
         )
         if answer == QMessageBox.StandardButton.Yes:
             self.session.send_admin("clear_chat")
-
-    def _ask_retention(self, mode: str, unit: str) -> None:
-        from PyQt6.QtWidgets import QInputDialog
-
-        value, ok = QInputDialog.getInt(
-            self, "Chat retention", f"Keep the last how many {unit}?", 500, 1, 1000000
-        )
-        if ok:
-            self._retention({"mode": mode, "value": value})
-
-    def _retention(self, policy: dict[str, Any]) -> None:
-        self.session.send_admin("set_retention", policy=policy)
 
     # ------------------------------------------------------------------ rendering
     def refresh(self, scroll_bottom: bool = False) -> None:

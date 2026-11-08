@@ -11,7 +11,7 @@ size cap (decoder) -> state machine -> role -> schema -> rate limit.
 from __future__ import annotations
 
 import logging
-import secrets
+import random
 import selectors
 import socket
 import time
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from common import chat as c
-from common.identity import b64, fingerprint_of, unb64, verify_proof
+from common.identity import valid_fingerprint
 from common.model import (
     KIND_BULK_CREATE,
     KIND_CLEAR,
@@ -33,7 +33,6 @@ from common.protocol import (
     MAX_FRAME,
     MAX_FRAME_PREAUTH,
     MAX_SERVER_FRAME,
-    PROTOCOL_VERSION,
     RELEASE_AFTER,
     TCP_PORT,
     UDP_PORT,
@@ -60,7 +59,6 @@ PARTIAL_FRAME_TIMEOUT = 15.0
 CLOSE_FLUSH_TIMEOUT = 2.0
 GROUP_COMMIT_WINDOW = 0.1
 SLOW_TICK = 1.0
-PRUNE_INTERVAL = 3600.0
 MAX_ROOMS = 2000
 INVITE_DEFAULT_TTL = 86400.0
 INVITE_MAX_TTL = 30 * 86400.0
@@ -74,7 +72,6 @@ _OP_FIELDS = (
 
 class State(Enum):
     CONNECTED = "connected"
-    CHALLENGED = "challenged"
     PENDING = "pending"
     ACTIVE = "active"
     CLOSING = "closing"
@@ -93,12 +90,10 @@ class Connection:
         self.last_recv = now
         self.partial_since: float | None = None
         self.close_deadline: float | None = None
-        self.nonce = b""
         self.hello: dict[str, Any] = {}
-        self.pubkey = b""
         self.fp = ""
         self.name = ""
-        self.client_id = secrets.token_hex(4)
+        self.client_id = f"{random.getrandbits(32):08x}"
         self.role: str | None = None
         self.room: Room | None = None
         self.away = False
@@ -152,7 +147,6 @@ class Server:
         self._closed = False
         self._last_commit = 0.0
         self._last_slow = 0.0
-        self._last_prune = 0.0
         self.server_id = ""
 
     # ------------------------------------------------------------------ lifecycle
@@ -167,7 +161,6 @@ class Server:
         self.listener.setblocking(False)
         self.port = self.listener.getsockname()[1]
         self.selector.register(self.listener, selectors.EVENT_READ, self._on_accept)
-        self._last_prune = self.clock()
         if self.want_discovery:
             self.discovery = Discovery(
                 self.discovery_port,
@@ -186,7 +179,7 @@ class Server:
         meta, _ = read_json_with_bak(path)
         if isinstance(meta, dict) and isinstance(meta.get("server_id"), str):
             return meta["server_id"]
-        server_id = secrets.token_hex(8)
+        server_id = f"{random.getrandbits(64):016x}"
         atomic_write_json(path, {"server_id": server_id}, keep_bak=True)
         return server_id
 
@@ -258,10 +251,6 @@ class Server:
             self._check_timeouts(now)
             for room in self.rooms.values():
                 room.maybe_snapshot(now)
-        if now - self._last_prune >= PRUNE_INTERVAL:
-            self._last_prune = now
-            for room in self.rooms.values():
-                room.chat.prune(room.acl.settings["chat_retention"])
 
     def _check_timeouts(self, now: float) -> None:
         for conn in list(self.conns):
@@ -269,7 +258,7 @@ class Server:
                 if conn.close_deadline is not None and now >= conn.close_deadline:
                     self._drop(conn)
                 continue
-            if conn.state in (State.CONNECTED, State.CHALLENGED):
+            if conn.state is State.CONNECTED:
                 if now - conn.created > HANDSHAKE_TIMEOUT:
                     self._fail(conn, ErrorCode.TIMEOUT, "handshake timed out")
                     continue
@@ -434,11 +423,6 @@ class Server:
                     self._fail(conn, ErrorCode.BAD_STATE, "HELLO expected")  # AC-03
                     return
                 self._on_hello(conn, msg)
-            elif conn.state is State.CHALLENGED:
-                if msg_type != MsgType.PROOF:
-                    self._fail(conn, ErrorCode.BAD_STATE, "PROOF expected")
-                    return
-                self._on_proof(conn, msg)
             elif conn.state is State.PENDING:
                 # Deny by default: nothing but keep-alive is answered, and no error is sent that
                 # could confirm or describe anything about the room's contents.
@@ -477,30 +461,14 @@ class Server:
 
     # ------------------------------------------------------------------ handshake
     def _on_hello(self, conn: Connection, msg: dict[str, Any]) -> None:
-        pubkey = unb64(msg.get("pubkey"))
+        fingerprint = msg.get("client_id")
         name = msg.get("username")
-        if pubkey is None or len(pubkey) != 32 or not isinstance(name, str):
+        if not valid_fingerprint(fingerprint) or not isinstance(name, str):
             self._fail(conn, ErrorCode.BAD_SCHEMA, "bad HELLO")
             return
-        conn.pubkey = pubkey
+        conn.fp = fingerprint
         conn.name = _clean_name(name)
         conn.hello = msg
-        # A fresh random nonce per connection is what makes a recorded PROOF useless (AC-05).
-        conn.nonce = secrets.token_bytes(32)
-        conn.state = State.CHALLENGED
-        self._send(
-            conn,
-            MsgType.CHALLENGE,
-            {"nonce": b64(conn.nonce), "protocol_version": PROTOCOL_VERSION},
-        )
-
-    def _on_proof(self, conn: Connection, msg: dict[str, Any]) -> None:
-        signature = unb64(msg.get("signature"))
-        if signature is None or not verify_proof(conn.pubkey, signature, conn.nonce):
-            self._fail(conn, ErrorCode.AUTH_FAILED, "identity proof failed")
-            return
-        # From here on the fingerprint is one this connection has proved it owns.
-        conn.fp = fingerprint_of(conn.pubkey)
         self._admit(conn)
 
     def _find_room(self, hello: dict[str, Any]) -> tuple[Room | None, bool]:
@@ -517,7 +485,7 @@ class Server:
         return None, False
 
     def _admit(self, conn: Connection) -> None:
-        """The access decision from Architecture.md section 6.2. Runs only after a valid proof."""
+        """Apply the room access decision after reading the client-supplied ID."""
         hello = conn.hello
         create = hello.get("create")
         if create is not None:
@@ -992,7 +960,6 @@ class Server:
             "set_settings": self._admin_settings,
             "rename": self._admin_rename,
             "clear_chat": self._admin_clear_chat,
-            "set_retention": self._admin_retention,
             "create_invite": self._admin_invite,
             "list_checkpoints": self._admin_list_checkpoints,
             "delete_checkpoint": self._admin_delete_checkpoint,
@@ -1115,16 +1082,6 @@ class Server:
         self._broadcast(room, MsgType.PRESENCE, {"event": "chat_cleared"})
         self._admin_ok(conn, "clear_chat")
 
-    def _admin_retention(self, conn: Connection, room: Room, msg: dict[str, Any]) -> None:
-        policy = msg.get("policy")
-        if not c.validate_retention(policy):
-            self._admin_fail(conn, "set_retention", ErrorCode.BAD_SCHEMA)
-            return
-        room.acl.settings["chat_retention"] = policy
-        room.acl.save()
-        room.chat.prune(policy)
-        self._admin_ok(conn, "set_retention")
-
     def _admin_invite(self, conn: Connection, room: Room, msg: dict[str, Any]) -> None:
         role = msg.get("role")
         if role not in A.ASSIGNABLE_ROLES:
@@ -1139,7 +1096,7 @@ class Server:
             self._admin_fail(conn, "create_invite", ErrorCode.BAD_SCHEMA)
             return
         token = room.acl.create_invite(role, float(ttl), msg.get("single_use", True) is not False)
-        # The raw token exists only in this reply; the server keeps just its hash.
+        # This proof-of-concept keeps invite tokens in plain text in the room ACL file.
         self._admin_ok(
             conn, "create_invite", token=token, role=role, expires=iso_utc(self.clock() + ttl)
         )

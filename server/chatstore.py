@@ -1,4 +1,4 @@
-"""Room and DM channels: ordering, persistence, history and retention (Architecture.md 4.5).
+"""Room and DM channels: ordering, persistence and history (Architecture.md 4.5).
 
 Each channel has its own ``chat_seq`` and its own CRC-checked log. Messages are also kept in memory:
 at lab scale that is a few megabytes at most, and it makes history paging trivially correct.
@@ -18,14 +18,11 @@ from server.persist import (
     RoomPaths,
     atomic_write_json,
     iso_utc,
-    parse_iso,
     read_json_with_bak,
     rewrite_log,
     scan_log,
     truncate_log,
 )
-
-DAY = 86400.0
 
 
 class Channel:
@@ -99,9 +96,8 @@ class ChatStore:
             note = channel.load()
             if note:
                 self.repairs.append(note)
-        # High-water marks survive pruning. Otherwise clearing a channel and restarting would reuse
-        # chat_seq values, and clients that dedupe by chat_seq would drop new messages as
-        # duplicates.
+        # Preserve high-water marks across clear operations so clients never see reused chat_seq
+        # values after the server restarts.
         meta, _ = read_json_with_bak(self.paths.chat_meta)
         for channel_id, seq in (meta or {}).items():
             if channel_id in self.channels:
@@ -224,29 +220,6 @@ class ChatStore:
         self.room.messages = []
         rewrite_log(self.room.path, [])
         self._save_meta()
-
-    def prune(self, policy: dict[str, Any]) -> None:
-        """Apply retention to every channel. Runs at startup and hourly."""
-        mode = policy.get("mode")
-        if mode == c.RETENTION_FOREVER:
-            return
-        self._save_meta()  # must precede the rewrite so a crash cannot lose the high-water mark
-        for channel in self.channels.values():
-            kept = self._apply_policy(channel.messages, mode, policy.get("value", 0))
-            if len(kept) != len(channel.messages):
-                channel.close()
-                channel.messages = kept
-                rewrite_log(channel.path, [(m["chat_seq"], m) for m in kept])
-
-    def _apply_policy(
-        self, messages: list[dict[str, Any]], mode: Any, value: int
-    ) -> list[dict[str, Any]]:
-        if mode == c.RETENTION_LAST_N:
-            return messages[-value:]
-        if mode == c.RETENTION_DAYS:
-            cutoff = self.clock() - value * DAY
-            return [m for m in messages if parse_iso(m["ts"]) >= cutoff]
-        return messages
 
     def sync(self) -> None:
         for channel in self.channels.values():

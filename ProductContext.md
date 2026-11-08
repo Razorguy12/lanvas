@@ -74,7 +74,7 @@ Tiers describe *what*; the phases in `Agents.md` §11 describe *in which order* 
 
 ### Tier 3: stretch (Phase 6, only if Tiers 1 and 2 pass multi-machine tests)
 - Version history timeline slider, presentation (follow-me) mode
-- TLS transport, per-page permissions, dark mode polish
+- per-page permissions, dark mode polish
 
 > **Rule:** Tier 3 work does not begin until Tier 1 passes a 4-machine LAN test.
 
@@ -99,7 +99,7 @@ Identity: **a Figma-class canvas that is network-transparent and security-native
 - As a visitor, I open the app and see the boards available on my network; if I pick one (or connect with a room code) but am not authorized, I see only a "Request access" screen. I receive **no** board data, chat, or participant list.
 - As an owner, I get a prompt "Alice (192.168.1.23, fingerprint `7F3A-91C2`) requests access", and I choose Approve as Editor, Approve as Viewer, or Deny.
 - As an owner, I can pre-invite people with a single-use invite code, change anyone's role, revoke access, mute, or kick, at any time.
-- As an approved member, I reconnect later and am recognized automatically (cryptographic identity), without asking again.
+- As a returning member, I reconnect with the same locally saved client ID and the server finds my ACL entry. This ID is not secure authentication.
 - As a viewer, I see live updates but my edit attempts are rejected by the **server** (not just greyed out in the UI).
 
 **Acceptance criteria**
@@ -129,7 +129,7 @@ Identity: **a Figma-class canvas that is network-transparent and security-native
 - Internet or cloud sync, accounts, or cloud storage
 - Mobile apps
 - Full Figma parity (components, auto layout, prototyping, plugins, vector boolean ops)
-- Strong anonymity or end-to-end encryption (including of private messages) beyond the LAN transport protections described in `Architecture.md`
+- Secure authentication, encrypted transport, or end-to-end encryption. The client ID is easy to copy and network traffic is plaintext.
 - Preventing a viewer with a modified client from capturing a board they are allowed to see
 
 ## 10. Save, recovery, and export (product rules)
@@ -171,7 +171,7 @@ Identity: **a Figma-class canvas that is network-transparent and security-native
 | Performance | Batching, simplification, throttled cursors, batched fsync, stats | Architecture §9 |
 | Concurrency | Single-threaded selector loop, global seq, per-channel chat seq | Architecture §5, §4.5 |
 | Reliability / recovery | Atomic checksummed storage, integrity scan, client journal | Architecture §12 |
-| Security / access | Owner-approved ACL, signed identity, DM routing, rate limits | Architecture §8 |
+| Security / access | Owner-approved ACL, client IDs, DM routing, rate limits | Architecture §8 |
 | Extras | Discovery, private chat, export formats, chaos sim, inspector, history | §5 above |
 
 ## 14. Risks
@@ -195,7 +195,7 @@ Identity: **a Figma-class canvas that is network-transparent and security-native
 - **Checkpoint:** a snapshot made on Ctrl+S, kept until the owner deletes it, restorable.
 - **Recovery journal:** client-side file of the last confirmed board plus unsent changes, used after a crash.
 - **ACL:** access control list for a room (identity to role).
-- **Identity:** a client keypair; its public-key fingerprint is the user's stable ID.
+- **Identity:** a locally saved random client ID; usernames are display labels. The server accepts the ID sent by the client, so it is not proof of ownership.
 - **Phase gate:** the set of tests that must pass before the next phase starts (`Agents.md` §11).
 
 ---

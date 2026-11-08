@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import secrets
+import random
 from typing import Any
 
 from PyQt6.QtCore import Qt
@@ -67,7 +67,7 @@ class CreateRoomDialog(QDialog):
         form = QFormLayout(self)
         self.name = QLineEdit(name)
         self.name.setPlaceholderText("Sprint-1")
-        self.code = QLineEdit(secrets.token_hex(3).upper())
+        self.code = QLineEdit("".join(random.choices("0123456789ABCDEF", k=6)))
         self.server = QComboBox()
         for server in servers:
             label = f"{server.server_name} ({server.address})"
@@ -130,11 +130,11 @@ class AccessRequestDialog(QDialog):
         layout.addWidget(title)
         details = QLabel(
             f"Address: {request.get('ip', '')}\n"
-            f"Fingerprint: {short_fingerprint(request['fingerprint'])}"
+            f"Client ID: {short_fingerprint(request['fingerprint'])}"
         )
         details.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(details)
-        hint = QLabel("Ask them to read out their fingerprint. It should match this one.")
+        hint = QLabel("Compare this ID with the visitor before approving.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -326,7 +326,7 @@ class VersionHistoryDialog(QDialog):
             author = entry.get("saved_by", {}).get("name", "?")
             label = entry.get("label") or "Saved"
             when = entry.get("time", "")[:19].replace("T", " ")
-            digest = entry.get("board_hash", "")[7:15]
+            digest = entry.get("board_hash", "").partition(":")[2][:8]
             item = QListWidgetItem(f"{when}  ·  {author}  ·  {label}  ·  {digest}")
             item.setData(Qt.ItemDataRole.UserRole, entry["checkpoint_id"])
             self.list.addItem(item)

@@ -119,7 +119,7 @@ def test_DS_04_announce_contains_nothing_private(srv, probe):
     time.sleep(0.05)
     probe.pump()
     blob = b"".join(probe.raw).decode()
-    for needle in ("TOP-SECRET", "secret-board-object", "secret-chat-text", "Hidden-room-name", hidden.room_id, member, owner.fp, "code_hash"):
+    for needle in ("TOP-SECRET", "secret-board-object", "secret-chat-text", "Hidden-room-name", hidden.room_id, member, owner.fp, "room_code"):
         assert needle not in blob, needle
     allowed_room = {"room_id", "name", "requires_approval", "require_code", "host_name", "member_count"}
     allowed_top = {"t", "server_id", "server_name", "addrs", "tcp_port", "protocol_version", "rooms", "page", "pages"}

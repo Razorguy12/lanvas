@@ -1,4 +1,6 @@
-"""Client networking without Qt: socket thread, handshake, heartbeat, reconnect, inspector, chaos.
+"""Client networking without Qt: socket thread, connection, heartbeat and reconnect.
+
+The module also provides the packet inspector and chaos simulator.
 
 ``client/net.py`` wraps this in a QObject that re-emits events as signals. Keeping it Qt-free lets
 the same code run in headless tests against a real server.
@@ -24,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from common.identity import Identity, b64, unb64
+from common.identity import Identity
 from common.protocol import (
     MAX_SERVER_FRAME,
     PING_INTERVAL,
@@ -60,7 +62,6 @@ FATAL_CODES = frozenset(
         ErrorCode.REVOKED,
         ErrorCode.ROOM_NOT_FOUND,
         ErrorCode.CODE_REQUIRED,
-        ErrorCode.AUTH_FAILED,
         ErrorCode.BAD_VERSION,
         ErrorCode.RATE_LIMITED,
     }
@@ -237,7 +238,7 @@ class NetCore:
             self._drain_wake()
             hello = {
                 "username": self.username,
-                "pubkey": b64(self.identity.pubkey),
+                "client_id": self.identity.fingerprint,
                 "protocol_version": PROTOCOL_VERSION,
                 **self.hello_fields(),
             }
@@ -327,13 +328,6 @@ class NetCore:
                     outbox += frame
 
     def _on_frame(self, msg_type: int, msg: dict[str, Any], outbox: bytearray) -> str:
-        if msg_type == MsgType.CHALLENGE:
-            nonce = unb64(msg.get("nonce"))
-            if nonce is None:
-                return "fatal"
-            proof = {"signature": b64(self.identity.sign_proof(nonce))}
-            outbox += encode_frame(MsgType.PROOF, proof)
-            return ""
         if msg_type == MsgType.PONG:
             sent = msg.get("t")
             if isinstance(sent, float):

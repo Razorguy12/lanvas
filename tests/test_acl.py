@@ -6,7 +6,6 @@ import itertools
 
 import pytest
 
-from common.identity import Identity, b64, unb64
 from common.protocol import ErrorCode, MsgType, encode_frame
 from server import acl as A
 from tests.harness import BotClient, FakeClock, add_member, make_room, start_server, wait_until
@@ -72,7 +71,6 @@ def _exercise(bot: BotClient, owner: BotClient, target_fp: str) -> dict[str, boo
     results["history"] = _wait_either(bot, MsgType.CHAT_HISTORY, MsgType.CHAT_REJECT)
     for action, fields in (
         ("clear_chat", {}),
-        ("set_retention", {"policy": {"mode": "forever"}}),
         ("set_settings", {"settings": {}}),
         ("create_invite", {"role": "viewer"}),
         ("list_checkpoints", {}),
@@ -95,12 +93,12 @@ def _wait_either(bot: BotClient, good: int, bad: int) -> bool:
 WIRE_EXPECTED = {
     "owner": dict.fromkeys(
         ["edit", "clear", "restore", "replace", "save", "chat", "dm", "history", "clear_chat",
-         "set_retention", "set_settings", "create_invite", "list_checkpoints"], True),
+         "set_settings", "create_invite", "list_checkpoints"], True),
     "editor": {"edit": True, "clear": False, "restore": False, "replace": False, "save": True, "chat": True,
-               "dm": True, "history": True, "clear_chat": False, "set_retention": False,
+               "dm": True, "history": True, "clear_chat": False,
                "set_settings": False, "create_invite": False, "list_checkpoints": False},
     "viewer": {"edit": False, "clear": False, "restore": False, "replace": False, "save": False, "chat": True,
-               "dm": True, "history": True, "clear_chat": False, "set_retention": False,
+               "dm": True, "history": True, "clear_chat": False,
                "set_settings": False, "create_invite": False, "list_checkpoints": False},
 }
 
@@ -192,45 +190,12 @@ def test_AC_03_raw_op_before_authentication_closes(srv):
     assert handle.server.rooms[owner.room_id].seq == 0
 
 
-def test_AC_03_op_between_hello_and_proof_closes(srv):
+def test_AC_03_op_before_hello_closes(srv):
     port, _ = srv
     make_room(port)
     bot = BotClient(port, "raw").connect()
-    bot.hello(room_code="x")
     bot.send_op({"kind": "clear"})
     assert bot.wait_closed()
-
-
-def test_AC_04_proof_signed_with_wrong_key_denied(srv):
-    port, handle = srv
-    owner = make_room(port)
-    bot = BotClient(port, "mallory").connect()
-    # Claims the owner's public key, but can only sign with its own private key.
-    bot.send(MsgType.HELLO, {"username": "owner", "pubkey": b64(owner.key.pubkey), "room_id": owner.room_id})
-    nonce = unb64(bot.wait_for(MsgType.CHALLENGE)["nonce"])
-    bot.send(MsgType.PROOF, {"signature": b64(Identity.generate().sign_proof(nonce))})
-    assert bot.wait_closed()
-    assert bot.wait_for(MsgType.ERROR)["code"] == ErrorCode.AUTH_FAILED
-    assert not bot.bytes_contain("snapshot")
-    assert handle.thread.is_alive()
-
-
-def test_AC_05_replayed_proof_rejected_fresh_nonce(srv):
-    port, _ = srv
-    owner = make_room(port)
-    first = BotClient(port, "owner", owner.key).connect()
-    nonce1 = unb64(first.hello(room_id=owner.room_id)["nonce"])
-    captured = first.key.sign_proof(nonce1)
-    first.send(MsgType.PROOF, {"signature": b64(captured)})
-    first.wait_for(MsgType.WELCOME)
-
-    attacker = BotClient(port, "attacker").connect()
-    attacker.send(MsgType.HELLO, {"username": "owner", "pubkey": b64(owner.key.pubkey), "room_id": owner.room_id})
-    nonce2 = unb64(attacker.wait_for(MsgType.CHALLENGE)["nonce"])
-    assert nonce1 != nonce2
-    attacker.send(MsgType.PROOF, {"signature": b64(captured)})
-    assert attacker.wait_closed()
-    assert attacker.wait_for(MsgType.ERROR)["code"] == ErrorCode.AUTH_FAILED
 
 
 def test_AC_06_owner_approves_live_transition(srv):

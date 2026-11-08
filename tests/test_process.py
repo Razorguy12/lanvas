@@ -89,7 +89,7 @@ def test_server_prints_addresses_and_integrity_summary(tmp_path):
     process.terminate()
     _, err = process.communicate(timeout=10)
     assert "integrity scan" in err and "listening on TCP" in err
-    assert f"room {owner.room_id}: seq=1 hash=sha256:" in err
+    assert f"room {owner.room_id}: seq=1 hash=crc32:" in err
     assert "code" not in err.lower().replace("error code", "")
 
 

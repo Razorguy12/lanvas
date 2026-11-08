@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import unicodedata
 from typing import Any
 
@@ -19,26 +18,16 @@ TAIL_SIZE = 50
 MAX_HISTORY_PAGE = 100
 PREVIEW_CHARS = 60
 
-RETENTION_FOREVER = "forever"
-RETENTION_LAST_N = "last_n"
-RETENTION_DAYS = "days"
-
-
 def dm_channel_id(fp_a: str, fp_b: str) -> str:
-    """Stable id for a pair of members.
-
-    Hashing the *sorted* pair gives both sides the same id without either being "first", and keeps
-    fingerprints out of file names. The id is also safe to use as a file name, unlike client input.
-    """
-    joined = "|".join(sorted((fp_a, fp_b)))
-    return DM_PREFIX + hashlib.sha256(joined.encode()).hexdigest()[:16]
+    """Stable, readable id for a pair of members, independent of who starts the DM."""
+    return DM_PREFIX + ":".join(sorted((fp_a, fp_b)))
 
 
 def is_dm_channel(channel_id: object) -> bool:
     if not isinstance(channel_id, str) or not channel_id.startswith(DM_PREFIX):
         return False
-    tail = channel_id[len(DM_PREFIX) :]
-    return len(tail) == 16 and all(c in "0123456789abcdef" for c in tail)
+    tail = channel_id[len(DM_PREFIX) :].split(":")
+    return len(tail) == 2 and all(valid_fingerprint(fp) for fp in tail) and tail[0] < tail[1]
 
 
 def clean_text(text: str) -> str:
@@ -67,15 +56,3 @@ def validate_outgoing(msg: dict[str, Any]) -> tuple[str | None, str]:
     if reply_to is not None and (type(reply_to) is not int or reply_to < 0):
         return ErrorCode.BAD_SCHEMA, ""
     return None, cleaned
-
-
-def validate_retention(policy: object) -> bool:
-    if not isinstance(policy, dict):
-        return False
-    mode = policy.get("mode")
-    if mode == RETENTION_FOREVER:
-        return True
-    value = policy.get("value")
-    if mode in (RETENTION_LAST_N, RETENTION_DAYS):
-        return type(value) is int and 0 < value <= 10_000_000
-    return False

@@ -442,7 +442,7 @@ def test_SE_01_garbage_never_kills_server(srv, seed):
 
 @pytest.mark.security
 def test_SE_01_authenticated_garbage_payloads(srv):
-    """Past authentication, every handler must survive wrong-typed fields."""
+    """After HELLO admission, every handler must survive wrong-typed fields."""
     port, handle = srv
     owner = make_room(port)
     junk_values = [None, 1, "x", [], {}, True, -1, 1.5, {"a": []}, ["x"]]

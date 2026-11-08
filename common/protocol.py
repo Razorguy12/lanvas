@@ -17,7 +17,7 @@ import zlib
 from enum import IntEnum
 from typing import Any
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 MAGIC = b"LV"
 HEADER = struct.Struct(">2sBBBI")
@@ -54,8 +54,7 @@ class MsgType(IntEnum):
     """Every frame type on the wire (Architecture.md section 4.2)."""
 
     HELLO = 1
-    CHALLENGE = 2
-    PROOF = 3
+    # 2 and 3 were challenge/proof messages in the removed signed-identity protocol.
     ACCESS_PENDING = 4
     ACCESS_REQUEST = 5
     ACCESS_DECISION = 6
@@ -90,7 +89,6 @@ class ErrorCode:
     BAD_JSON = "BAD_JSON"
     BAD_STATE = "BAD_STATE"
     BAD_SCHEMA = "BAD_SCHEMA"
-    AUTH_FAILED = "AUTH_FAILED"
     ACCESS_DENIED = "ACCESS_DENIED"
     ROOM_NOT_FOUND = "ROOM_NOT_FOUND"
     CODE_REQUIRED = "CODE_REQUIRED"
@@ -150,7 +148,7 @@ def json_depth_ok(raw: bytes, limit: int = MAX_JSON_DEPTH) -> bool:
 
 
 def _reject_constant(name: str) -> None:
-    # NaN and Infinity are not JSON and would poison canonical hashing, so they are refused.
+    # NaN and Infinity are not JSON and would poison canonical state checks, so they are refused.
     raise ValueError(f"non-finite number: {name}")
 
 

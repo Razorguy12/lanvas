@@ -6,14 +6,12 @@ every frame, because the UI's greyed-out buttons protect nothing against a raw s
 
 from __future__ import annotations
 
-import hashlib
-import secrets
+import random
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from common.chat import RETENTION_FOREVER
 from server.persist import atomic_write_json
 
 ROLE_OWNER = "owner"
@@ -53,7 +51,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "show_member_count": True,
     "discoverable": True,
     "locked": False,
-    "chat_retention": {"mode": RETENTION_FOREVER},
 }
 BOOL_SETTINGS = (
     "editors_can_clear",
@@ -76,11 +73,6 @@ def can(role: str | None, action: str, settings: dict[str, Any]) -> bool:
     return action in _MATRIX[role]
 
 
-def hash_secret(secret: str) -> str:
-    """Room codes and invite tokens are stored only as hashes (Agents.md section 7)."""
-    return hashlib.sha256(secret.encode()).hexdigest()
-
-
 class Acl:
     """Persisted room ACL. Every mutation is saved atomically before the caller acts on it."""
 
@@ -98,7 +90,11 @@ class Acl:
         self.members = data.get("members", {})
         self.requests = data.get("requests", {})
         self.invites = data.get("invites", {})
-        self.settings = {**DEFAULT_SETTINGS, **data.get("settings", {})}
+        saved_settings = data.get("settings", {})
+        self.settings = {
+            **DEFAULT_SETTINGS,
+            **{key: value for key, value in saved_settings.items() if key in DEFAULT_SETTINGS},
+        }
 
     def save(self) -> None:
         atomic_write_json(
@@ -180,8 +176,8 @@ class Acl:
 
     # --- invites ---
     def create_invite(self, role: str, ttl: float, single_use: bool = True) -> str:
-        token = secrets.token_urlsafe(9)
-        self.invites[hash_secret(token)] = {
+        token = "".join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=12))
+        self.invites[token] = {
             "role": role,
             "expires": self.clock() + ttl,
             "single_use": single_use,
@@ -191,16 +187,15 @@ class Acl:
 
     def consume_invite(self, token: str) -> str | None:
         """Return the invite's role if valid. A single-use invite is burned before it is honored."""
-        key = hash_secret(token)
-        invite = self.invites.get(key)
+        invite = self.invites.get(token)
         if invite is None:
             return None
         if invite["expires"] < self.clock():
-            del self.invites[key]
+            del self.invites[token]
             self.save()
             return None
         if invite["single_use"]:
-            del self.invites[key]
+            del self.invites[token]
             self.save()
         return invite["role"]
 

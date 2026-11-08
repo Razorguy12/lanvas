@@ -94,7 +94,7 @@ class ChatModel:
         return [self.room, *dms]
 
     def load_welcome(self, welcome: dict[str, Any]) -> None:
-        """Merge retained history. On reconnect this leaves local outbox and scrollback intact."""
+        """Merge server history. On reconnect this leaves local outbox and scrollback intact."""
         room = self.room
         room.read_upto = max(room.read_upto, welcome.get("room_read", 0))
         for message in welcome.get("chat_tail", []):

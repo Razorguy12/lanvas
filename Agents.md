@@ -6,7 +6,7 @@
 
 ## 1. Mission
 
-Build a **Figma-style, LAN-only collaborative whiteboard** in Python with **raw sockets**, **PyQt6**, **creator-approved access control**, live board discovery, room and private chat with retained history, secure save with crash recovery, and export to PNG/JPEG/SVG/PDF.
+Build a **Figma-style, LAN-only collaborative whiteboard** in Python with **raw sockets**, **PyQt6**, **creator-approved access control**, live board discovery, room and private chat with persistent history, crash recovery, and export to PNG/JPEG/SVG/PDF.
 
 Work proceeds **phase by phase** (§11): finish a phase, test it, pass its gate, then start the next. Repeat until the whole project is complete and tested.
 
@@ -29,7 +29,7 @@ If code and docs disagree, **stop and flag it**; do not silently diverge. If you
 - **Never touch Qt objects from the network, discovery, or IO threads.** Use signals/slots.
 - **All persistent writes go through the durable writer** (`Architecture.md` §12.1): atomic replace, `fsync`, checksums. Never `open(path, "w")` on a data file directly.
 - **Python 3.11+, cross-platform** (Windows, Linux, macOS): use `pathlib`, no OS-specific paths or shell calls, handle line endings.
-- Pin dependencies in `requirements.txt` (`PyQt6`, `cryptography`, `pytest`, `pyinstaller`; optional `Pillow`). Export uses Qt built-ins (`QImage`, `QSvgGenerator`, `QPdfWriter`); encryption and signatures use `cryptography`. No new dependency is needed for the revision-2 features.
+- Pin dependencies in `requirements.txt` (`PyQt6`, `pytest`, `pyinstaller`; optional `Pillow`). Export uses Qt built-ins (`QImage`, `QSvgGenerator`, `QPdfWriter`). This proof of concept uses plain client IDs and CRC checksums, not cryptographic authentication or encryption.
 
 ## 4. Setup and commands
 
@@ -49,7 +49,7 @@ Network ports: **TCP 47801** (app), **UDP 47800** (discovery: announces and disc
 ## 5. Coding conventions
 
 - Type hints everywhere; `dataclasses` for messages and model objects; `black` style (line length 100); `ruff` clean.
-- **Comment the *why*** (the brief grades commented source): module docstring, class docstring, and comments on every non-obvious protocol, concurrency, or durability decision (e.g. why `fsync` the directory, why DM channel ids are hashed).
+- **Comment the *why*** (the brief grades commented source): module docstring, class docstring, and comments on every non-obvious protocol, concurrency, or durability decision (e.g. why `fsync` the directory, why DM channel IDs use sorted member IDs).
 - Small functions; no global mutable state except explicit singletons in `server/loop.py`.
 - Message types, error codes, and file-format versions are **constants in `common/protocol.py` / `common/snapshot.py`**, never string literals scattered in code.
 - Logging via `logging` (levels: DEBUG frames, INFO lifecycle, WARNING rejected ops/chat and recovery repairs, ERROR bugs). No `print` in library code (the server's startup summary uses a dedicated logger).
@@ -67,12 +67,12 @@ Any change to framing, message types, op or chat schema, discovery payload, file
 
 - Every incoming frame passes: size cap → state-machine check → role check → schema validation → rate limit.
 - **Deny by default.** `PENDING`/`DENIED` connections get nothing (no snapshot, no chat, no chat history, no presence, no checkpoints).
-- **Private messages go to exactly two fingerprints.** Route by the channel's fingerprints, never by username or by a client-supplied list. History requests are checked against the requester.
+- **Private messages go to exactly two client IDs.** Route by the channel's IDs, never by username or by a client-supplied list. History requests are checked against the requester.
 - Never log DM text at INFO or above; never include DMs in audit exports or the AI assistant's context.
 - Validate all numeric ranges, string lengths, array sizes, JSON depth. Reject unknown `kind`s and unknown chat channels.
 - Discovery: never put room codes, member names, or content in announces; reply unicast and rate-limited.
-- Never log private keys, invite tokens, passwords, or full room codes. Store invite tokens and room codes **hashed**.
-- Private identity keys and recovery journals live only in the client's user config/data dir with `0600` permissions where supported.
+- Do not log invite tokens or full room codes. This proof of concept stores room codes and active invite tokens as plain text and has no cryptographic security.
+- Client IDs and recovery journals live in the client's user data directory.
 - Add a test for every new permission-relevant path, including a **raw-socket bypass** attempt.
 
 ## 8. Testing requirements
@@ -100,7 +100,7 @@ Any change to framing, message types, op or chat schema, discovery payload, file
 | Module | Owner role | Key files |
 |---|---|---|
 | Protocol & server core | Backend lead | `common/protocol.py`, `server/loop.py`, `oplog.py`, `chatstore.py` |
-| Access control & security | Security lead | `server/acl.py`, `common/identity.py`, `common/snapshot.py` (hashing, snapshots), TLS |
+| Access control | Security lead | `server/acl.py`, `common/identity.py`, `common/snapshot.py` (IDs and checksums) |
 | Persistence & recovery | Backend lead + Client-net lead | `server/persist.py`, `server/oplog.py`, `client/recovery.py` |
 | Client networking & models | Client-net lead | `client/net.py`, `document.py`, `chatmodel.py` |
 | Canvas, tools, panels, export UI | UI lead | `client/canvas/`, `client/panels/`, `client/export/`, `theme.py` |
@@ -127,10 +127,10 @@ The project is delivered as a sequence of phases. **There are no calendar dates.
 | Phase | Build | Gate (IDs from `Architecture.md` §14, plus all earlier gates) |
 |---|---|---|
 | **0. Foundations** | `common/protocol.py` (framing, constants), `model.py`, `fractional.py`, `identity.py`, `chat.py`, `snapshot.py` (canonical JSON, board hash, snapshots); `persist.py` durable writer; `scripts/check.py`; test harness skeleton. **Freeze `common/` at the end.** | FR-01..FR-06; L0 for model, fractional, identity, snapshots; SV-03 (writer only); XP-06; `check.py` green on Windows and Linux |
-| **1. Server core and storage** | Selectors loop, connection state machine, ops + seq, broadcast, dedupe, resync/snapshots, chat store (room + DM channels, history, retention), checkpoints and `SAVE`, startup integrity scan | OR-01..OR-06, RC-02, RC-03, RC-05..RC-07, CT-01, CT-02, CT-04, CT-06..CT-10, CT-12, SV-01, SV-03..SV-06, SE-01..SE-04 (L1/L2 with bots) |
+| **1. Server core and storage** | Selectors loop, connection state machine, ops + seq, broadcast, dedupe, resync/snapshots, chat store (room + DM channels and history), checkpoints and `SAVE`, startup integrity scan | OR-01..OR-06, RC-02, RC-03, RC-05..RC-07, CT-01, CT-02, CT-04, CT-06..CT-10, CT-12, SV-01, SV-03..SV-06, SE-01..SE-04 (L1/L2 with bots) |
 | **2. Access control** | ACL, owner approval flow, invites, roles, mute, rate limits, pending/denied isolation for ops **and** chat | AC-01..AC-12, CT-05, CT-11, SV-02 |
 | **3. Client core and discovery** | `net.py`, `document.py`, minimal canvas (pen + rect), discovery (server announce + client `DiscoveryWorker`), launcher with live board list, join flow and request-access screen; first PyInstaller build | DS-01..DS-08, RC-01, XP-03 (basic: launch, discover, join, draw), XP-04; first L3 run |
-| **4. Tier 1 complete** | Full Tier 1 tools, room chat + private messages UI with retained history, undo/redo, reconnect with outboxes, Ctrl+S server checkpoint, client recovery journal and Recover dialog, export PNG | UN-01..UN-04, RC-04, CT-03, SV-01..SV-07, EX-01; `Design.md` §13.1 rows for Tier 1; clean L3 run on 3+ machines (Tier 1 exit, `Architecture.md` §14.7) |
+| **4. Tier 1 complete** | Full Tier 1 tools, room chat + private messages UI with persistent history, undo/redo, reconnect with outboxes, Ctrl+S server checkpoint, client recovery journal and Recover dialog, export PNG | UN-01..UN-04, RC-04, CT-03, SV-01..SV-07, EX-01; `Design.md` §13.1 rows for Tier 1; clean L3 run on 3+ machines (Tier 1 exit, `Architecture.md` §14.7) |
 | **5. Tier 2: Figma feel** | Select/transform, layers, properties, frames, stickies, arrows, images; export JPEG/SVG/PDF with scopes; checkpoint browser + restore; Packet Inspector; chaos simulator | UN-05, SV-11, EX-02..EX-04, EX-06..EX-08, CH-01..CH-03, PF-01..PF-06, XP-01..XP-03; full `Design.md` §13.1; L3 run (Tier 2 exit) |
 | **6. Tier 3 and Signature (optional)** | Only items from `ProductContext.md` §6 Tier 3 / Signature, chosen by the team, one at a time; each item gets its own tests | Each item's new tests + full regression + L3 run. **Skip this phase entirely if Phase 5 took too long.** |
 | **7. Release** | Feature freeze. Packaging on each demo OS, technical PDF, PPT, videos, demo rehearsal, fresh-machine unzip test | Release candidate criteria (`Architecture.md` §14.7): all IDs green on all demo OSes, XP-04..XP-06, L4 acceptance (`ProductContext.md` §16), fresh-machine offline test by two people not on the build |

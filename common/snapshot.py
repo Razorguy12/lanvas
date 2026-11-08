@@ -1,9 +1,8 @@
-"""Canonical board hashing and verified server/client recovery snapshots."""
+"""Canonical board checksums and verified server/client recovery snapshots."""
 
 from __future__ import annotations
 
 import gzip
-import hashlib
 import json
 import zlib
 from typing import Any
@@ -12,7 +11,7 @@ from common.model import Board
 
 SNAPSHOT_FORMAT = "lanvas-snapshot"
 SNAPSHOT_VERSION = 2
-HASH_PREFIX = "sha256:"
+HASH_PREFIX = "crc32:"
 MAX_SNAPSHOT_INFLATED = 256 * 1024 * 1024
 
 
@@ -24,9 +23,9 @@ def canonical_json(obj: Any) -> bytes:
 
 
 def board_hash(board: Board | dict[str, Any]) -> str:
-    """Hash canonical board data for convergence and checkpoint verification."""
+    """Return a small non-cryptographic checksum for convergence and corruption checks."""
     data = board.to_json() if isinstance(board, Board) else board
-    return HASH_PREFIX + hashlib.sha256(canonical_json(data)).hexdigest()
+    return HASH_PREFIX + f"{zlib.crc32(canonical_json(data)) & 0xFFFFFFFF:08x}"
 
 
 def _inflate_bounded(raw: bytes) -> bytes:

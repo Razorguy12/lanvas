@@ -4,7 +4,7 @@
 
 > **Implementation notes (spec gaps filled while building, no wire change from a released version).** `HELLO` also carries `create`, `invite` and `last_seq` (§4.2). `ADMIN` has an S→C reply (§4.2). A sixth op kind, `bulk_create`, gives "bulk create" its wire form (§5.2). Server-to-client frames may reach 64 MB (§4.1). Announces carry `require_code` per room (§4.4). Crash-safety code lives once in `common/durable.py` (§12.1).
 
-> **Spec revision 2** adds: private (direct) messages and retained chat history (§4.5), live board discovery (§4.4), secure save with Ctrl+S and file recovery (§12), and export to PNG/JPEG/SVG/PDF (§12.5). `PROTOCOL_VERSION = 2`.
+> **Spec revision 3** uses simple client IDs and removes chat pruning and cryptographic features. The wire protocol version is `PROTOCOL_VERSION = 3`.
 
 ---
 
@@ -17,7 +17,7 @@
 | Transport | **TCP** via raw `socket` | Reliable, ordered per connection |
 | Discovery | **UDP** broadcast via raw `socket` | Connectionless, ideal for "who is out there?" |
 | Server I/O | `socket` + `selectors` (single thread) | Low-level, no races, trivial ordering. **No asyncio streams, no socketserver, no websockets** |
-| Crypto | `cryptography` (Ed25519, AES-256-GCM, scrypt, optional TLS cert gen); stdlib `hmac`, `hashlib`, `ssl` | Identity, signed/encrypted save files, transport protection |
+| Identity/checks | Python `random` for demo IDs and `zlib.crc32` for non-cryptographic checksums | Stable demo identities, board convergence and basic corruption detection |
 | Export | Qt built-ins: `QImage` (PNG/JPEG), `QSvgGenerator` (SVG), `QPdfWriter` (PDF) | No extra dependency, works offline |
 | Packaging | PyInstaller (build per OS) | Standalone executables |
 | Tests | `pytest` | Protocol, ordering, ACL, chaos, persistence |
@@ -45,7 +45,7 @@
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-The server is the **single authority** for: membership, permissions, operation order, chat order and retention, and canonical board state. Clients are untrusted.
+The server is the **single authority** for: membership, permissions, operation order, chat order, and canonical board state. Clients are untrusted.
 
 ## 3. Repository layout
 
@@ -55,9 +55,9 @@ lanvas/
 │   ├─ protocol.py      # framing, message types, encode/decode, constants
 │   ├─ model.py         # object schema, property validation, apply_op()
 │   ├─ fractional.py    # fractional indexing for z-order
-│   ├─ identity.py      # Ed25519 keys, fingerprints, signatures
+│   ├─ identity.py      # locally saved demo client IDs
 │   ├─ chat.py          # chat message schema, channel ids, validation
-│   ├─ snapshot.py      # canonical JSON, board hash, verified recovery snapshots
+│   ├─ snapshot.py      # canonical JSON, board checksum, verified recovery snapshots
 │   ├─ durable.py       # the durable writer, shared by server and client (§12.1)
 │   ├─ netutil.py       # IPv4 interfaces, broadcast addresses, shared discovery socket
 │   └─ simplify.py      # Ramer-Douglas-Peucker stroke simplification (§9)
@@ -67,7 +67,7 @@ lanvas/
 │   ├─ rooms.py         # Room, membership, presence
 │   ├─ acl.py           # roles, requests, invites, rate limits
 │   ├─ oplog.py         # append-only log, snapshots, checkpoints, startup recovery
-│   ├─ chatstore.py     # room chat + DM channels, history, retention
+│   ├─ chatstore.py     # room chat + DM channels and history
 │   ├─ discovery.py     # UDP announce/respond
 │   └─ persist.py       # room paths and durable writer helpers
 ├─ client/
@@ -89,7 +89,7 @@ lanvas/
 └─ build/ (pyinstaller specs)
 ```
 
-Rules: `common/` and `server/` import **no Qt**. `client/` never imports `server/`. `common/snapshot.py` is shared so that the server and client produce byte-identical canonical JSON and hashes.
+Rules: `common/` and `server/` import **no Qt**. `client/` never imports `server/`. `common/snapshot.py` is shared so that the server and client produce byte-identical canonical JSON and checksums.
 
 ## 4. Protocol
 
@@ -113,9 +113,7 @@ Every message is one frame:
 
 | Type | Dir | Purpose | Reliability |
 |---|---|---|---|
-| `HELLO` | C→S | version, username, identity pubkey, and `room_id` (from discovery) **or** `room_code` **or** `create{name, code, discoverable, require_code, show_member_count}`; optional `invite` token and `last_seq` | n/a |
-| `CHALLENGE` | S→C | random nonce for identity proof | n/a |
-| `PROOF` | C→S | Ed25519 signature of nonce | n/a |
+| `HELLO` | C→S | version, username, client-supplied `client_id`, and `room_id` (from discovery) **or** `room_code` **or** `create{name, code, discoverable, require_code, show_member_count}`; optional `invite` token and `last_seq` | n/a |
 | `ACCESS_PENDING` | S→C | not authorized, request recorded | n/a |
 | `ACCESS_REQUEST` | S→owner | who is asking (name, IP, fingerprint) | logged |
 | `ACCESS_DECISION` | owner→S | approve(role) / deny | logged |
@@ -131,7 +129,7 @@ Every message is one frame:
 | `RESYNC` / `SNAPSHOT` | both | gap recovery | n/a |
 | `SAVE` | C→S | Ctrl+S: request a durable server checkpoint (§12.3) | n/a |
 | `SAVE_ACK` / `SAVE_REJECT` | S→C | checkpoint `seq`, `board_hash`, `checkpoint_id`, time; or error code | n/a |
-| `ADMIN` | both | C→S: `set_role`, `kick`, `revoke`, `mute`, `set_settings` (includes lock), `rename`, `clear_chat`, `set_retention`, `create_invite`, `list_checkpoints`, `delete_checkpoint`, `delete_room`. S→C: `{action, ok, ...}` reply, e.g. the invite token or checkpoint list. A refusal is a non-fatal `ERROR` | logged |
+| `ADMIN` | both | C→S: `set_role`, `kick`, `revoke`, `mute`, `set_settings` (includes lock), `rename`, `clear_chat`, `create_invite`, `list_checkpoints`, `delete_checkpoint`, `delete_room`. S→C: `{action, ok, ...}` reply, e.g. the invite token or checkpoint list. A refusal is a non-fatal `ERROR` | logged |
 | `PING` / `PONG` | both | liveness plus RTT | n/a |
 | `ERROR` | S→C | code and message | n/a |
 
@@ -173,11 +171,11 @@ A server with no rooms still announces (`"rooms": []`), so the Create room dialo
 
 **Abuse controls:** replies are unicast and never larger than one announce; at most 5 replies/s per source IP; the server ignores discover packets over 512 bytes.
 
-### 4.5 Chat: room chat, private messages, and retention
+### 4.5 Chat: room chat, private messages, and persistent history
 
 **Channels**
 - `room`: one per room, every `ACTIVE` member receives it.
-- `dm:<id>`: one per pair of members, `id = sha256(sorted([fp_a, fp_b]))[:16]`. Delivered **only** to the connections of those two fingerprints. Addressing is by **fingerprint**, never username (usernames can collide).
+- `dm:<id>`: one per pair of members, `id` contains the two sorted client IDs. Delivered **only** to the connections of those two IDs. Addressing is by client ID, never username (usernames can collide).
 
 **CHAT payload (C→S)**
 ```
@@ -192,16 +190,16 @@ CHAT { msg_id: "clientId:counter", channel: "room" | "dm", to: "<fingerprint>" (
 4. Assign `chat_seq = ++channel.seq`, stamp server UTC time, append to the channel's `.jsonl` file (durable writer, §12.1).
 5. Deliver `CHAT{channel_id, chat_seq, from_fp, from_name, ts, text}`: room → all `ACTIVE` members; DM → sender's and recipient's live connections only. Offline DM recipients get it from history on next connect.
 
-**Retention (chat is kept, not ephemeral)**
+**Persistent history**
 - Room chat and DMs are **persisted on the server** and survive client reconnects and server restarts.
-- Default retention: **kept for the lifetime of the room**. The owner can set a policy: keep forever / last N messages / last N days. Pruning runs at startup and every hour; it never removes messages newer than the newest checkpoint export that included chat.
+- Messages remain until the owner clears room chat or deletes the room. There is no automatic age or message-count pruning setting.
 - The owner can **clear room chat** (`ADMIN clear_chat`, logged). Owners cannot read or clear other members' DMs through the UI.
 - On `WELCOME`, the client receives `chat_tail` (last 50 room messages) and `dm_index` (for each DM channel: peer fingerprint and name, last message preview, unread count). Older messages are fetched with `CHAT_HISTORY{channel_id, before_chat_seq, limit ≤ 100}`.
 - Unread positions are stored server-side per member (`CHAT_READ`) so they follow the user across reconnects.
 - Revoked or kicked members stop receiving chat and DMs immediately; their earlier messages stay in history under their name.
 - Un-acked outgoing chat is kept in the client outbox and recovery journal and re-sent after reconnect (deduped by `msg_id`).
 
-**Honest privacy note (for the report):** DMs are hidden from other members, but they are stored in plaintext on the **server machine's disk**, and travel in plaintext on the LAN unless TLS is enabled (§8). They are not end-to-end encrypted.
+**Privacy note:** DMs are routed away from other members, but are stored in plaintext on the **server machine's disk** and travel in plaintext on the LAN. They are not end-to-end encrypted.
 
 ## 5. Data model, ordering and concurrency
 
@@ -272,16 +270,15 @@ Fields an op may set are whitelisted by the server. `seq`, `author`, and `author
 
 ### 6.1 Identity
 
-On first launch the client generates an **Ed25519 keypair** (stored in the user's config dir). The **fingerprint** (short hash of the public key) is the stable user ID. Usernames are display-only and may collide; the fingerprint is what the ACL, DM addressing, and save-file signatures track.
+On first launch the client generates a random 128-bit ID and saves it as plain text in the user's config directory. The formatted ID is used by ACL membership, DM routing and display disambiguation. The server accepts the ID sent by the client without proof of ownership. This is convenient for a proof of concept, but any client can copy another member's ID and impersonate them.
 
 ### 6.2 Connection state machine (server)
 
 ```
-CONNECTED → (HELLO) → CHALLENGED → (PROOF ok) → AUTHENTICATED
-   ├─ identity in ACL as member ─────────────► ACTIVE(role)
-   ├─ identity pending ──────────────────────► PENDING   (only ACCESS_PENDING / PING allowed)
-   ├─ identity denied/revoked ───────────────► DENIED    (close, cool-down)
-   └─ unknown identity ──► create request ───► PENDING, notify owner
+CONNECTED → (HELLO with client ID) → admission check
+   ├─ ID in ACL as member ───────────────────► ACTIVE(role)
+   ├─ ID denied/revoked ─────────────────────► DENIED    (close, cool-down)
+   └─ unknown ID ──► create request ─────────► PENDING, notify owner
 ```
 
 In `PENDING`/`DENIED`, the server **never** sends snapshots, ops, chat (room or DM), chat history, checkpoints, or participant lists, and drops any other frame type. This is enforced server-side regardless of the UI.
@@ -289,11 +286,11 @@ In `PENDING`/`DENIED`, the server **never** sends snapshots, ops, chat (room or 
 ### 6.3 Room ACL (persisted in `acl.json`)
 
 ```
-owner: <fingerprint>
-members: { fingerprint → {role, name, added_at, muted} }
-requests: { fingerprint → {name, ip, time, status} }
-invites: { token_hash → {role, expires, single_use} }
-settings: { editors_can_clear, viewers_can_export, require_code, chat_retention, show_member_count }
+owner: <client_id>
+members: { client_id → {role, name, added_at, muted} }
+requests: { client_id → {name, ip, time, status} }
+invites: { token → {role, expires, single_use} }
+settings: { editors_can_clear, viewers_can_export, require_code, show_member_count }
 ```
 
 Permission matrix:
@@ -305,7 +302,7 @@ Permission matrix:
 | Send room chat | ✔ | ✔ | ✔ (owner can mute) | ✘ |
 | Send / receive private messages (DMs) | ✔ | ✔ | ✔ (owner can mute) | ✘ |
 | Read chat history (room + own DMs only) | ✔ | ✔ | ✔ | ✘ |
-| Clear room chat, set chat retention | ✔ | ✘ | ✘ | ✘ |
+| Clear room chat | ✔ | ✘ | ✘ | ✘ |
 | `SAVE` (server checkpoint, Ctrl+S) | ✔ | ✔ | ✘ | ✘ |
 | Export (client-side) | ✔ | ✔ | owner-configurable | ✘ |
 | Clear board | ✔ | owner-configurable | ✘ | ✘ |
@@ -323,22 +320,21 @@ Requests queue in the ACL; owner gets them on next connect. Approved members kee
 ## 7. Connection management and recovery
 
 - `PING`/`PONG` every 5 s; no traffic for 15 s → mark **away**; 60 s → release the slot (ACL membership is *not* lost).
-- Client reconnects with exponential backoff, presents identity, sends `last_seq` and the last `chat_seq` per open channel.
+- Client reconnects with exponential backoff, presents its saved ID, sends `last_seq` and the last `chat_seq` per open channel.
 - Server replies with the ops after `last_seq`, or a full snapshot if too old, plus missed chat. Client keeps un-acked local ops and chat and re-sends them (server dedupes by `op_id` / `msg_id`).
 - Server restart: run the integrity scan (§12.4), then rebuild state from the newest valid snapshot plus the `ops.jsonl` tail.
 - Automatic snapshots every 200 ops or 2 minutes; manual checkpoints on Ctrl+S (§12.3).
 
 ## 8. Security
 
-- **Authentication:** Ed25519 challenge-response; no passwords on the wire.
-- **Authorization:** enforced per frame on the server (see matrix). Clients are never trusted.
-- **Room code** is a locator, not a credential. Even with the code, access needs owner approval (or a valid invite).
-- **Invites:** random single-use token, stored hashed, with expiry.
-- **DM routing:** the server delivers a DM only to the two fingerprints of the channel; history requests are checked against the requester's fingerprint.
-- **Save files:** written atomically, checksummed, signed with the saver's identity key, optionally encrypted with a password (§12.5). Files in the user data dir use `0600` where supported.
+- **Identity:** the client ID is sent in HELLO without a signature or password. It can be copied, so identity is not secure.
+- **Authorization:** role and membership checks are enforced per frame on the server. A forged client ID can impersonate an existing member.
+- **Room code and invites:** stored as plain text for this proof of concept; do not use sensitive codes.
+- **DM routing:** the server delivers a DM only to the two client IDs in the channel; history requests are checked against the requester's ID. Network traffic is plaintext.
+- **Saved data:** atomic file writes and CRC-32 checks catch common accidental corruption. CRC-32 is not cryptographic and cannot prevent deliberate edits.
 - **Abuse controls:** frame-size caps, per-connection token-bucket rate limit (ops and chat), per-IP request limits and cool-down, max objects and points, JSON depth limit, discovery reply rate limit.
-- **Transport:** Tier 3 target is TLS via `ssl` wrapping the raw socket with a self-signed cert generated on first server run, plus trust-on-first-use pinning in the client. If TLS slips, the access model above still holds, but traffic (including DMs) is plaintext on the LAN. Document this honestly.
-- **Threat notes for the report:** same-LAN sniffing (mitigated by TLS), rogue client sending malformed frames (validation), impersonation (identity keys), brute-force requests (rate limits), replay of `PROOF` (fresh nonce per connection), DM snooping by other members (server-side routing), tampered save files (hash + signature), discovery amplification (unicast, rate-limited replies).
+- **Transport:** TLS is not implemented. TCP content, including private messages, is plaintext on the LAN.
+- **Threat notes:** rate limits and input validation reduce accidental or noisy misuse, but this proof of concept does not protect against impersonation, sniffing, or deliberate data tampering.
 
 ## 9. Performance
 
@@ -374,7 +370,7 @@ All persistent files go through one helper, `common/durable.py`. `server/persist
 
 1. **Whole-file writes are atomic:** write `<name>.tmp` → `flush` → `os.fsync` → `os.replace(tmp, name)` → `fsync` the directory (POSIX). A crash leaves either the old file or the new file, never a half file.
 2. **Append-only logs are self-checking:** each line of `ops.jsonl` and chat logs is `{"seq":…, "data":…, "crc":<crc32 of data>}`. A torn or corrupt **last** line is detected and truncated on startup; corruption in the middle stops replay at the last good line and falls back as in §12.4.
-3. **Every snapshot and checkpoint carries a SHA-256** of its canonical board JSON, verified before use.
+3. **Every snapshot and checkpoint carries a CRC-32 checksum** of its canonical board JSON, checked before use. It detects many accidental changes but is not tamper-resistant.
 
 Line endings are normalized to `\n`; all paths use `pathlib`.
 
@@ -382,7 +378,7 @@ Line endings are normalized to `\n`; all paths use `pathlib`.
 
 ```
 data/rooms/<room_id>/
-   room.json                 # name, code hash, settings
+   room.json                 # name, plain-text room code, settings
    acl.json
    ops.jsonl                 # append-only, one op per line: seq, data, crc
    chat/
@@ -398,10 +394,10 @@ data/rooms/<room_id>/
 Snapshot / checkpoint file:
 ```
 { "format": "lanvas-snapshot", "version": 2, "room_id": "…", "seq": 1234,
-  "created_at": "UTC ISO-8601", "board": { …canonical… }, "board_hash": "sha256:…" }
+  "created_at": "UTC ISO-8601", "board": { …canonical… }, "board_hash": "crc32:…" }
 ```
 
-### 12.3 Ctrl+S: secure save
+### 12.3 Ctrl+S: server checkpoint
 
 Pressing **Ctrl+S** (or the Save button) requests a verified server checkpoint:
 
@@ -414,7 +410,7 @@ The owner can browse checkpoints (Version history) and `restore` one (§5.2).
 
 **Server startup integrity scan (`server/oplog.py`)**
 1. For each room, load `acl.json` and `room.json`; on parse failure, use `<name>.bak` (the previous atomic version is kept as `.bak`).
-2. Pick the newest snapshot or checkpoint whose SHA-256 verifies; skip any that fail and note them in `recovery.log`.
+2. Pick the newest snapshot or checkpoint whose CRC-32 matches; skip any that fail and note them in `recovery.log`.
 3. Replay `ops.jsonl` lines with `seq` > snapshot seq while CRCs verify; truncate a torn tail.
 4. Recompute `board_hash` and log `room, seq, hash, repairs`. The server prints a one-line summary per room.
 5. Chat logs get the same CRC check and tail truncation.
@@ -443,7 +439,7 @@ All exports are written atomically through the durable writer. Scope can be: who
 | Ordering with N simulated clients | All reach identical board hash |
 | Dedupe and gap/resync | Reliability rules |
 | ACL matrix | Every role/action pair, including raw-socket bypass attempts |
-| Chat routing and retention | DMs reach only their two members; history survives restarts |
+| Chat routing and persistent history | DMs reach only their two members; history survives restarts |
 | Discovery | New devices see boards quickly; nothing private is advertised |
 | Undo conflict cases | §5.5 behavior |
 | Reconnect and server restart | Recovery |
@@ -451,7 +447,7 @@ All exports are written atomically through the durable writer. Scope can be: who
 | Export round trips | Every supported export opens and renders the board |
 | Chaos soak | Convergence under delay/duplicates |
 
-**Convergence check:** after any test, every client computes `sha256(canonical_json(board))`; all hashes must match the server's.
+**Convergence check:** after any test, every client computes `crc32(canonical_json(board))`; all checksums must match the server's.
 
 ---
 
@@ -472,10 +468,10 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 ### 14.2 Harness (`tests/harness.py`)
 
 - `start_server(tmpdir)` returns `(port, handle)`; uses a temp data dir, so tests never touch real rooms. `handle.kill()` simulates a crash (no clean shutdown); `handle.restart()` runs the integrity scan.
-- `BotClient(port, name, key)` implements HELLO/PROOF, `send_op()`, `send_chat()`, `send_dm(fp)`, `save()`, `recv_until(seq)`, `board_hash()`. Bots use the **same `common/protocol.py`** but their own socket code, so framing bugs are not hidden.
+- `BotClient(port, name, identity)` implements HELLO with a client ID, `send_op()`, `send_chat()`, `send_dm(fp)`, `save()`, `recv_until(seq)`, `board_hash()`. Bots use the **same `common/protocol.py`** but their own socket code, so framing bugs are not hidden.
 - `DiscoveryProbe(port)` sends/receives UDP on a test port.
 - `FaultyFS` wraps the durable writer to inject a crash after any write step (after `tmp` write, before `replace`, mid-append).
-- `FakeClock` injected into the server for heartbeat, retention, and timeout tests (no real sleeping).
+- `FakeClock` injected into the server for heartbeat and timeout tests (no real sleeping).
 - Randomized tests print their **seed** on failure and accept `--seed` to reproduce.
 - UI and export tests use `QT_QPA_PLATFORM=offscreen`; nothing in L0-L2 server tests may need a display.
 - pytest markers: `unit`, `integration`, `security`, `chaos`, `perf`, `lan`, `chat`, `discovery`, `persist`, `export`.
@@ -521,8 +517,6 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 | AC-01 | Role x message-type matrix (generated table) | Every cell matches the §6.3 permission matrix |
 | AC-02 | Unknown identity connects with correct room code or room_id | Only `ACCESS_PENDING`; **zero** SNAPSHOT/OP/CHAT/CHAT_HISTORY/PRESENCE bytes |
 | AC-03 | Raw `OP` before authentication | Connection closed |
-| AC-04 | `PROOF` signed with the wrong key | Denied |
-| AC-05 | Replay an old `PROOF` on a new connection | Rejected (fresh nonce) |
 | AC-06 | Owner approves a pending connection | Live transition to `ACTIVE`, receives snapshot and chat tail |
 | AC-07 | Owner revokes or kicks a live member | Connection downgraded/closed immediately; no further chat or DMs delivered |
 | AC-08 | Viewer sends `OP` | `OP_REJECT`; state unchanged on all clients |
@@ -548,7 +542,7 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 | CT-07 | `CHAT_HISTORY` for a DM channel the requester is not part of | Rejected, no data |
 | CT-08 | Server restart | Room chat and DMs, order and timestamps, and unread positions preserved |
 | CT-09 | History paging over 500 messages | Pages are contiguous, no gaps or duplicates |
-| CT-10 | Retention "last N" / "N days" (fake clock); owner clears room chat | Only expected messages remain; DMs untouched by room clear |
+| CT-10 | Owner clears room chat | Room messages are removed; DMs remain untouched |
 | CT-11 | Muted member sends room chat / DM | Both rejected |
 | CT-12 | Chat flood | Rate limit applies; server responsive |
 
@@ -573,7 +567,7 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 | SV-02 | Viewer sends `SAVE` | `SAVE_REJECT{NOT_ALLOWED}` |
 | SV-03 | Crash injected at each durable-writer step (`FaultyFS`) | After restart, every file is either the old or the new version; never partial |
 | SV-04 | Torn last line in `ops.jsonl` and in a chat log | Truncated, logged in `recovery.log`; hash equals last durable state |
-| SV-05 | Newest snapshot corrupted (bad SHA-256) | Falls back to the previous one + replay; hash equals pre-crash |
+| SV-05 | Newest snapshot corrupted (bad CRC-32) | Falls back to the previous one + replay; checksum equals pre-crash |
 | SV-06 | `acl.json` corrupted | `.bak` used; ACL intact |
 | SV-07 | Client killed with un-acked ops and unsent chat | Recovery dialog on next launch; "Rejoin and send" restores them with no duplicates |
 | SV-11 | Owner restores a checkpoint, then undoes | Board equals checkpoint hash on all clients; undo returns previous hash |
@@ -634,7 +628,7 @@ Section 13 is the summary; this is the procedure the team follows. Test IDs are 
 
 ### 14.4 Convergence check (used everywhere)
 
-`board_hash = sha256(canonical_json(sorted objects with props, z, deleted flags))`. After any L2/L3/chaos test, every client computes it and all must equal the server's. The same function produces checkpoint and snapshot hashes.
+`board_hash = crc32(canonical_json(sorted objects with props, z, deleted flags))`. After any L2/L3/chaos test, every client computes it and all must equal the server's. The same function produces checkpoint and snapshot checksums.
 
 ### 14.5 When tests run
 

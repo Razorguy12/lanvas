@@ -32,7 +32,7 @@ def app_dir() -> Path:
 
 
 def identity_file() -> Path:
-    return app_dir() / "identity.key"
+    return app_dir() / "identity.id"
 
 
 def settings_file() -> Path:

@@ -138,7 +138,7 @@ Contextual sections: Position & size (X, Y, W, H, rotation), Fill, Stroke, Opaci
 - **Offline recipient:** the header shows "Bob is offline; they'll see this when they reconnect."
 - **States per message:** sending (faded), sent (normal), failed (red ⟳ retry). Unsent messages survive reconnects and crashes.
 - **Roles:** viewers can read and, if not muted, send room messages and private messages. Muted users see the input disabled with "The owner has muted you in this room."
-- **Owner extras** (⋯ menu on the room channel): Clear room chat (confirm dialog), Chat retention (Forever / Last N messages / Last N days).
+- **Owner extras** (⋯ menu on the room channel): Clear room chat (confirm dialog). Chat history otherwise remains on the server until the room is removed.
 
 ### Users and Access
 Avatar stack in the top bar (initial letters on user color). Click opens the **People popover**: list with role badges, connection state, **Message** (opens a private conversation), "Following" option, and (owner only) role dropdown, kick, mute.

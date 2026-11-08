@@ -10,11 +10,8 @@ import pytest
 from common import fractional as fr
 from common.identity import (
     Identity,
-    fingerprint_of,
     short_fingerprint,
     valid_fingerprint,
-    verify,
-    verify_proof,
 )
 from common.model import MAX_OBJECTS, MAX_POINTS, MAX_TEXT, Board, apply_op, validate_op
 from common.protocol import ErrorCode
@@ -162,28 +159,14 @@ def test_fractional_open_ends_and_validity(seed):
         fr.between("B", "A")
 
 
-def test_identity_sign_verify_and_fingerprint():
+def test_identity_id_is_unique_and_valid():
     a, b = Identity.generate(), Identity.generate()
     assert a.fingerprint != b.fingerprint and valid_fingerprint(a.fingerprint)
-    assert fingerprint_of(a.pubkey) == a.fingerprint
     assert len(short_fingerprint(a.fingerprint)) == 9
-    assert verify(a.pubkey, a.sign(b"m"), b"m")
-    assert not verify(b.pubkey, a.sign(b"m"), b"m")
-    assert not verify(a.pubkey, a.sign(b"m"), b"n")
-    assert not verify(b"short", b"junk", b"m")
 
 
-def test_identity_proof_is_domain_separated():
-    # A plain signature over the nonce must not pass as a proof, and vice versa.
-    a = Identity.generate()
-    nonce = b"n" * 32
-    assert verify_proof(a.pubkey, a.sign_proof(nonce), nonce)
-    assert not verify_proof(a.pubkey, a.sign(nonce), nonce)
-
-
-def test_identity_persists_with_private_permissions(tmp_path: Path):
-    path = tmp_path / "cfg" / "identity.key"
+def test_identity_persists_as_plain_text_id(tmp_path: Path):
+    path = tmp_path / "cfg" / "identity.id"
     first = Identity.load_or_create(path)
     assert Identity.load_or_create(path).fingerprint == first.fingerprint
-    if __import__("os").name != "nt":
-        assert path.stat().st_mode & 0o777 == 0o600
+    assert path.read_text(encoding="ascii") == first.fingerprint

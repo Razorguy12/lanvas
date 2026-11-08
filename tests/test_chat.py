@@ -6,8 +6,7 @@ import pytest
 
 from common.chat import dm_channel_id
 from common.protocol import ErrorCode, MsgType
-from server.persist import iso_utc
-from tests.harness import BotClient, FakeClock, add_member, make_room, start_server
+from tests.harness import BotClient, add_member, make_room, start_server
 
 pytestmark = [pytest.mark.integration, pytest.mark.chat]
 
@@ -176,44 +175,6 @@ def test_CT_09_history_paging_contiguous(trio):
     assert seen == list(range(1, 501))
 
 
-def test_CT_10_retention_last_n_and_days_and_clear(tmp_path):
-    clock = FakeClock()
-    port, handle = start_server(tmp_path, clock=clock)
-    try:
-        a = make_room(port)
-        b = add_member(a, port, "b")
-        room = handle.server.rooms[a.room_id]
-        for i in range(10):
-            room.chat.append("room", a.fp, "owner", None, f"m{i}", f"x:{i}", None)
-        a.send_dm(b.fp, "keep me")
-        a.wait_for(MsgType.CHAT_ACK)
-
-        a.admin("set_retention", policy={"mode": "last_n", "value": 3})
-        a.wait_for(MsgType.ADMIN)
-        assert [m["text"] for m in room.chat.room.messages] == ["m7", "m8", "m9"]
-
-        clock.advance(3 * 86400)
-        room.chat.append("room", a.fp, "owner", None, "fresh", "x:new", None)
-        a.admin("set_retention", policy={"mode": "days", "value": 1})
-        a.wait_for(MsgType.ADMIN)
-        assert [m["text"] for m in room.chat.room.messages] == ["fresh"]
-
-        a.admin("clear_chat")
-        a.wait_for(MsgType.ADMIN)
-        assert room.chat.room.messages == []
-        dm = room.chat.channels[dm_channel_id(a.fp, b.fp)]
-        assert dm.messages == []  # days policy removed the old DM...
-        last_seq = room.chat.room.seq
-        room_id = a.room_id
-        handle.kill()
-        handle.restart()
-        room = handle.server.rooms[room_id]
-        # ...but sequence numbers are never reused after pruning, even across a restart.
-        assert room.chat.room.seq == last_seq and room.chat.room.messages == []
-    finally:
-        handle.stop()
-
-
 def test_CT_10_clear_room_leaves_dms_alone(trio):
     a, b, _, handle = trio
     a.send_chat("room text")
@@ -227,17 +188,6 @@ def test_CT_10_clear_room_leaves_dms_alone(trio):
     assert room.chat.channels[dm_channel_id(a.fp, b.fp)].messages[0]["text"] == "dm text"
     a.send_chat("after clear")  # the log must still be writable after being rewritten
     assert a.wait_for(MsgType.CHAT, lambda m: m["text"] == "after clear")["chat_seq"] == 2
-
-
-@pytest.mark.parametrize("policy", [{"mode": "last_n", "value": 0}, {"mode": "x"}, "forever", {"mode": "days", "value": True}])
-def test_CT_10_bad_retention_refused(trio, policy):
-    a, _, _, _ = trio
-    a.admin("set_retention", policy=policy)
-    assert a.wait_for(MsgType.ERROR)["code"] == ErrorCode.BAD_SCHEMA
-
-
-def test_CT_10_retention_timestamps_use_server_clock():
-    assert iso_utc(0).startswith("1970-01-01T00:00:00")
 
 
 def test_CT_11_muted_member_rejected_room_and_dm(trio):

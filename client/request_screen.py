@@ -50,7 +50,7 @@ class RequestAccessPage(QWidget):
         self.state.setWordWrap(True)
         state_row.addWidget(self.state, 1)
         column.addLayout(state_row)
-        finger_label = QLabel("Your fingerprint, for the owner to check with you:")
+        finger_label = QLabel("Your client ID, for the owner to compare:")
         finger_label.setObjectName("muted")
         finger_label.setWordWrap(True)
         column.addWidget(finger_label)

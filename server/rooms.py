@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-import secrets
+import random
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from common.model import Board, apply_op
-from server.acl import Acl, hash_secret
+from server.acl import Acl
 from server.chatstore import ChatStore
 from server.oplog import OpLog, load_json_file, recover_board, write_recovery_log
 from server.persist import RoomPaths, atomic_write_json
@@ -22,11 +22,11 @@ log = logging.getLogger("lanvas.recovery")
 
 
 def new_room_id() -> str:
-    return "r_" + secrets.token_hex(8)
+    return "r_" + f"{random.getrandbits(64):016x}"
 
 
 def new_room_code() -> str:
-    return secrets.token_hex(3).upper()
+    return "".join(random.choices("0123456789ABCDEF", k=6))
 
 
 class Room:
@@ -37,7 +37,7 @@ class Room:
         self.clock = clock
         self.paths = RoomPaths(data_dir, room_id)
         self.name = ""
-        self.code_hash = ""
+        self.room_code = ""
         self.host_name = ""
         self.board = Board()
         self.seq = 0
@@ -63,7 +63,7 @@ class Room:
     ) -> Room:
         room = cls(data_dir, room_id or new_room_id(), clock)
         room.name = name
-        room.code_hash = hash_secret(code)
+        room.room_code = code
         room.host_name = owner_name
         room.acl.settings["discoverable"] = discoverable
         room.save_meta()
@@ -82,7 +82,7 @@ class Room:
             log.error("room %s: metadata unrecoverable, not loaded", room_id)
             return None
         room.name = meta.get("name", room_id)
-        room.code_hash = meta.get("code_hash", "")
+        room.room_code = meta.get("room_code", "")
         room.host_name = meta.get("host_name", "")
         room.acl.load(acl)
         got = recover_board(room.paths, room_id, repairs)
@@ -93,7 +93,6 @@ class Room:
         room.oplog.last_snapshot_seq = got.snapshot_seq
         room.oplog.last_snapshot_time = clock()
         repairs.extend(room.chat.load())
-        room.chat.prune(room.acl.settings["chat_retention"])
         write_recovery_log(room.paths, room_id, room.seq, room.board, repairs, clock())
         return room
 
@@ -103,14 +102,14 @@ class Room:
             {
                 "id": self.room_id,
                 "name": self.name,
-                "code_hash": self.code_hash,
+                "room_code": self.room_code,
                 "host_name": self.host_name,
             },
             keep_bak=True,
         )
 
     def code_matches(self, code: Any) -> bool:
-        return isinstance(code, str) and hash_secret(code) == self.code_hash
+        return isinstance(code, str) and code == self.room_code
 
     # --- ops ---
     def apply_and_log(self, op: dict[str, Any]) -> dict[str, Any]:

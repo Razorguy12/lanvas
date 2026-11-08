@@ -222,5 +222,5 @@ def truncate_log(path: Path, length: int) -> None:
 
 
 def rewrite_log(path: Path, entries: Iterator[tuple[int, Any]] | list[tuple[int, Any]]) -> None:
-    """Replace a whole log atomically; used when retention prunes chat history."""
+    """Replace a whole log atomically; used when an owner clears room chat."""
     atomic_write(path, b"".join(encode_log_line(seq, data) for seq, data in entries))

@@ -1,104 +1,62 @@
-"""User identity: an Ed25519 keypair whose public-key fingerprint is the stable user ID.
+"""Simple persistent client IDs used to associate members with ACL entries.
 
-Usernames are display-only and may collide, so the ACL, DM routing and file signatures all key on
-the fingerprint. The server always derives the fingerprint from the public key it verified a
-signature against; a client-supplied fingerprint is never believed.
+This is a proof-of-concept identity only. The server accepts the ID sent in HELLO, so it does not
+prove who owns that ID and must not be treated as secure authentication.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import os
+import random
 from pathlib import Path
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from common.durable import atomic_write
 
-from common import durable
-
-# The proof signs this prefix plus the nonce, not the bare nonce. Otherwise a rogue server could
-# Domain separation prevents a proof signature from being reused for another signed payload.
-PROOF_DOMAIN = b"LANVAS-PROOF-v2:"
-NONCE_BYTES = 32
-FINGERPRINT_HEX = 32
+ID_HEX = 32
+FINGERPRINT_LENGTH = ID_HEX + ID_HEX // 4 - 1
 
 
-def fingerprint_of(pubkey: bytes) -> str:
-    """128-bit SHA-256 prefix grouped for reading aloud, e.g. ``7F3A-91C2-...``."""
-    digest = hashlib.sha256(pubkey).hexdigest().upper()[:FINGERPRINT_HEX]
-    return "-".join(digest[i : i + 4] for i in range(0, FINGERPRINT_HEX, 4))
-
-
-def short_fingerprint(fingerprint: str) -> str:
-    """The short code the UI shows for verbal verification, e.g. ``7F3A-91C2``."""
-    return fingerprint[:9]
+def _format_id(value: str) -> str:
+    value = value.upper()
+    return "-".join(value[i : i + 4] for i in range(0, ID_HEX, 4))
 
 
 def valid_fingerprint(value: object) -> bool:
-    if not isinstance(value, str) or len(value) != FINGERPRINT_HEX + FINGERPRINT_HEX // 4 - 1:
+    if not isinstance(value, str) or len(value) != FINGERPRINT_LENGTH:
         return False
-    return all(c in "0123456789ABCDEF-" for c in value)
+    groups = value.split("-")
+    return len(groups) == 8 and all(
+        len(group) == 4 and all(char in "0123456789ABCDEF" for char in group)
+        for group in groups
+    )
 
 
-def verify(pubkey: bytes, signature: bytes, message: bytes) -> bool:
-    try:
-        Ed25519PublicKey.from_public_bytes(pubkey).verify(signature, message)
-        return True
-    except (InvalidSignature, ValueError):
-        return False
-
-
-def b64(data: bytes) -> str:
-    return base64.b64encode(data).decode()
-
-
-def unb64(text: object) -> bytes | None:
-    """Decode strict base64 from untrusted input; returns None instead of raising."""
-    if not isinstance(text, str):
-        return None
-    try:
-        return base64.b64decode(text, validate=True)
-    except ValueError:
-        return None
+def short_fingerprint(fingerprint: str) -> str:
+    """Short form shown in the UI for comparing member IDs."""
+    return fingerprint[:9]
 
 
 class Identity:
-    """A local keypair. The private half never leaves this object or the key file."""
+    """A stable random ID saved locally; it contains no keys or cryptographic proof."""
 
-    def __init__(self, key: Ed25519PrivateKey) -> None:
-        self._key = key
-        self.pubkey = key.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw
-        )
-        self.fingerprint = fingerprint_of(self.pubkey)
+    def __init__(self, fingerprint: str) -> None:
+        if not valid_fingerprint(fingerprint):
+            raise ValueError("invalid client ID")
+        self.fingerprint = fingerprint
 
     @classmethod
     def generate(cls) -> Identity:
-        return cls(Ed25519PrivateKey.generate())
+        value = f"{random.getrandbits(ID_HEX * 4):0{ID_HEX}X}"
+        return cls(_format_id(value))
 
     @classmethod
     def load_or_create(cls, path: Path) -> Identity:
-        """Load the key from the user's config dir, creating it on first launch (0600)."""
+        """Load the saved ID, or replace an old key file with a new plain-text ID."""
         if path.exists():
-            raw = path.read_bytes()
-            return cls(Ed25519PrivateKey.from_private_bytes(raw))
+            try:
+                return cls(path.read_text(encoding="ascii").strip())
+            except (OSError, UnicodeError, ValueError):
+                pass
         identity = cls.generate()
-        raw = identity._key.private_bytes(
-            serialization.Encoding.Raw,
-            serialization.PrivateFormat.Raw,
-            serialization.NoEncryption(),
-        )
-        durable.atomic_write(path, raw, mode=0o600 if os.name != "nt" else None)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(path, identity.fingerprint.encode("ascii"))
         return identity
-
-    def sign(self, message: bytes) -> bytes:
-        return self._key.sign(message)
-
-    def sign_proof(self, nonce: bytes) -> bytes:
-        return self.sign(PROOF_DOMAIN + nonce)
-
-
-def verify_proof(pubkey: bytes, signature: bytes, nonce: bytes) -> bool:
-    return verify(pubkey, signature, PROOF_DOMAIN + nonce)

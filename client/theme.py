@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import sys
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -96,8 +96,8 @@ def current() -> Theme:
 
 def user_color(fingerprint: str) -> str:
     """Derived from the identity, so every client paints a given person in the same color."""
-    digest = hashlib.sha256(fingerprint.encode()).digest()
-    return USER_COLORS[digest[0] % len(USER_COLORS)]
+    checksum = zlib.crc32(fingerprint.encode())
+    return USER_COLORS[checksum % len(USER_COLORS)]
 
 
 def load_fonts() -> bool:

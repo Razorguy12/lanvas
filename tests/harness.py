@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from common import durable
-from common.identity import Identity, b64, unb64
+from common.identity import Identity
 from common.model import Board, apply_op
 from common.protocol import MAX_SERVER_FRAME, FrameDecoder, MsgType, encode_frame
 from common.snapshot import board_hash
@@ -46,7 +46,7 @@ class FaultyFS:
 
 
 class FakeClock:
-    """Injected into the server so timeouts and retention can be tested without sleeping."""
+    """Injected into the server so timeout behavior can be tested without sleeping."""
 
     def __init__(self, now: float = 1_700_000_000.0) -> None:
         self.now = now
@@ -204,16 +204,12 @@ class BotClient:
         self.closed = True
 
     # ---- protocol helpers ----
-    def hello(self, **fields: Any) -> dict[str, Any]:
-        payload = {"username": self.name, "pubkey": b64(self.key.pubkey), **fields}
+    def hello(self, **fields: Any) -> None:
+        payload = {"username": self.name, "client_id": self.fp, **fields}
         self.send(MsgType.HELLO, payload)
-        challenge = self.wait_for(MsgType.CHALLENGE)
-        return challenge
 
     def handshake(self, **fields: Any) -> None:
-        challenge = self.hello(**fields)
-        nonce = unb64(challenge["nonce"])
-        self.send(MsgType.PROOF, {"signature": b64(self.key.sign_proof(nonce))})
+        self.hello(**fields)
 
     def join(self, **fields: Any) -> dict[str, Any]:
         """Connect and expect WELCOME: for owners, existing members, and invite holders."""

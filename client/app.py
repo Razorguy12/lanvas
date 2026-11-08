@@ -34,7 +34,6 @@ ERROR_TEXT = {
     ErrorCode.KICKED: "The owner removed you from this room.",
     ErrorCode.REVOKED: "The owner revoked your access to this room.",
     ErrorCode.RATE_LIMITED: "Too many requests from this address. Try again in a minute.",
-    ErrorCode.AUTH_FAILED: "The server could not verify your identity.",
     ErrorCode.BAD_VERSION: "That server runs a different version of LANvas.",
 }
 
