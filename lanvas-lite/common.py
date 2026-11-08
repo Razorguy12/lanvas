@@ -7,6 +7,7 @@ lets both sides find message boundaries.
 import hashlib
 import hmac
 import json
+import math
 import struct
 
 PORT = 47801
@@ -60,6 +61,8 @@ def apply_op(objects, op):
     Used identically by server and clients. Every op is idempotent, so a duplicated or retransmitted
     op changes nothing. Returns True only if the board actually changed.
         {"k": "add", "obj": {...}}   {"k": "del", "id": "..."}   {"k": "clear"}
+        {"k": "fill", "id": "...", "f": "#rrggbb" or ""}          (set an object's fill colour)
+        {"k": "repl", "del": [ids], "add": [objs]}                (area eraser: replace objects by pieces)
     """
     k = op.get("k")
     if k == "add":
@@ -73,4 +76,73 @@ def apply_op(objects, op):
         had = bool(objects)
         objects.clear()
         return had
+    if k == "fill":
+        o = objects.get(op.get("id"))
+        if not o or o.get("f", "") == op.get("f", ""):
+            return False
+        objects[o["id"]] = {**o, "f": op.get("f", "")}      # new dict: never mutate copies held by undo
+        return True
+    if k == "repl":
+        changed = False
+        for i in op.get("del", []):
+            changed |= objects.pop(i, None) is not None
+        for o in op.get("add", []):
+            if o["id"] not in objects:
+                objects[o["id"]] = o
+                changed = True
+        return changed
     return False
+
+
+# ---------- area ("regular") eraser geometry ----------
+
+def outline(o):
+    """An erasable object as a polyline [x0,y0,x1,y1,...], or None (text and notes are not erasable)."""
+    k, p = o["k"], o["p"]
+    if k in ("stroke", "line"):
+        return list(p)
+    if k == "rect":
+        x0, y0, x1, y1 = p
+        return [x0, y0, x1, y0, x1, y1, x0, y1, x0, y0]
+    if k == "oval":
+        cx, cy, rx, ry = (p[0] + p[2]) / 2, (p[1] + p[3]) / 2, abs(p[2] - p[0]) / 2, abs(p[3] - p[1]) / 2
+        n = 64
+        return [v for i in range(n + 1) for v in (cx + rx * math.cos(2 * math.pi * i / n),
+                                                  cy + ry * math.sin(2 * math.pi * i / n))]
+    return None
+
+
+def erase_pieces(o, x, y, r, max_pts=1400):
+    """Rub out the part of `o` within radius r of (x, y). Returns None if `o` is untouched, otherwise the
+    list of remaining polylines (possibly empty = fully erased). Segments are densified first so the
+    eraser cuts a clean gap even through long straight lines."""
+    pts = outline(o)
+    if pts is None:
+        return None
+    rr = r + o["w"] / 2
+    xs, ys = pts[0::2], pts[1::2]
+    if x < min(xs) - rr or x > max(xs) + rr or y < min(ys) - rr or y > max(ys) + rr:
+        return None
+    step = max(2.0, rr / 2)
+    dense = [(xs[0], ys[0])]
+    for i in range(1, len(xs)):
+        (ax, ay), bx, by = dense[-1], xs[i], ys[i]
+        n = max(1, int(math.hypot(bx - ax, by - ay) / step))
+        dense += [(ax + (bx - ax) * j / n, ay + (by - ay) * j / n) for j in range(1, n + 1)]
+    keep = [math.hypot(px - x, py - y) > rr for px, py in dense]
+    if all(keep):
+        return None
+    pieces, run = [], []
+    for (px, py), k in zip(dense, keep):
+        if k:
+            run.append((round(px, 1), round(py, 1)))
+        if (not k or len(run) >= max_pts) and run:
+            if len(run) >= 2:
+                pieces.append([v for q in run for v in q])
+            run = run[-1:] if k else []          # a split at max_pts keeps continuity
+    if len(run) >= 2:
+        pieces.append([v for q in run for v in q])
+    loop = dense[0] == dense[-1] and keep[0] and keep[-1]
+    if loop and len(pieces) >= 2 and len(pieces[0]) + len(pieces[-1]) <= 2 * max_pts:
+        pieces[0] = pieces.pop() + pieces[0][2:]      # closed outline: the cut-open ends are one piece
+    return pieces
