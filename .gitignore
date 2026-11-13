@@ -18,6 +18,7 @@ htmlcov/
 # Build artifacts (build/*.py are source and stay tracked)
 dist/
 build/work/
+lanvas-lite/build/
 *.spec
 *.spec.bak
 

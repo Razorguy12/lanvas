@@ -1,0 +1,30 @@
+# Builds LANvas Lite executables for Linux and Windows (PyInstaller can't cross-compile, so each OS
+# builds on its own runner). Run it from the GitHub "Actions" tab -> "LANvas Lite executables" -> Run workflow,
+# then download the artifacts from the finished run.
+name: LANvas Lite executables
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ["lanvas-lite/**", ".github/workflows/lanvas-lite-build.yml"]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: lanvas-lite
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyinstaller PyQt6
+      - run: python build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lanvas-lite-${{ runner.os }}
+          path: lanvas-lite/dist/*
